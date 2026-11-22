@@ -22,6 +22,10 @@ A production-grade Hubitat integration for the **EyezOn UNO Alarm System**.
 - CID fast-path support for alarm-class events
 - REST metadata support for zone labels and partition label
 - REST startup sync for immediate zone-state initialization after reconnect
+- Panel trouble decoding on the UNO Connection device (AC failure, low battery, server offline, zone trouble, siren fault, and more)
+- Door chime on/off commands (`chimeOn` / `chimeOff`) on the UNO Connection and partition devices. The UNO does not report chime state, so the `chime` attribute reflects the last accepted command.
+
+Currently only partition 1 is supported.
   
 ## REST metadata and startup sync
 

@@ -213,6 +213,14 @@ def armAway() {
     getChildDevice("uno-connection")?.armAway()
 }
 
+def chimeOn() {
+    getChildDevice("uno-connection")?.chimeOn()
+}
+
+def chimeOff() {
+    getChildDevice("uno-connection")?.chimeOff()
+}
+
 def disarm(String code = null) {
     if (code) {
         getChildDevice("uno-connection")?.disarm(code)
@@ -231,33 +239,31 @@ def notifyPartitionState(String status) {
 def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String suggestedName = null) {
     if (zoneNum == null || zoneNum <= 0) return
 
-    Map hints = parseZoneHints(settings.zoneHints)
-    state.zoneHintsMap = hints
-
+    Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
     Map hint = hints["${zoneNum}"] ?: [:]
 
-    String hintedLabel = hint.label?.trim()
-    String hintedType  = hint.type?.trim()
+    String hintedLabel = hint.label?.trim() ?: null
+    String hintedType  = hint.type?.trim() ?: null
     String restLabel   = state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
 
     String inferredName = suggestedName?.trim()
     String inferredType = suggestedType?.trim()
+    String nameForInference = hintedLabel ?: restLabel ?: inferredName
 
-    String resolvedType = canonicalType(
-        hintedType ?:
-        inferredType ?:
-        inferTypeFromName(hintedLabel ?: restLabel ?: inferredName) ?:
-        settings.defaultUnknownZoneType ?:
-        "contact"
-    )
-
-    String desiredDriver = driverNameForType(resolvedType)
     String dni = "uno-zone-${zoneNum}"
     def existing = getChildDevice(dni)
 
     String finalLabel = hintedLabel ?: restLabel ?: inferredName ?: existing?.label ?: "Zone ${zoneNum}"
 
     if (!existing) {
+        String desiredDriver = driverNameForType(canonicalType(
+            hintedType ?:
+            inferredType ?:
+            inferTypeFromName(nameForInference) ?:
+            settings.defaultUnknownZoneType ?:
+            "contact"
+        ))
+
         addChildDevice(
             "uno",
             desiredDriver,
@@ -272,23 +278,10 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
         return
     }
 
-    boolean needsRecreate = false
-    String existingTypeName = null
-
-    try {
-        existingTypeName = existing.getTypeName()
-    } catch (ignored) {
-        try {
-            existingTypeName = existing.typeName
-        } catch (ignored2) {
-        }
-    }
+    String existingTypeName = deviceTypeName(existing)
+    String desiredDriver = desiredDriverForExisting(existingTypeName, hintedType, inferredType, nameForInference)
 
     if (existingTypeName && existingTypeName != desiredDriver) {
-        needsRecreate = true
-    }
-
-    if (needsRecreate) {
         try {
             deleteChildDevice(dni)
         } catch (e) {
@@ -321,69 +314,43 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
 }
 
 private void reconcileExistingZones() {
-    Map hints = parseZoneHints(settings.zoneHints)
-
+    // Reuse the upsert rules so reconcile and discovery can never disagree about a zone's type.
+    List<Integer> zoneNums = []
     getChildDevices()?.each { dev ->
         String dni = dev.deviceNetworkId ?: ""
         if (!dni.startsWith("uno-zone-")) return
 
         Integer zoneNum = safeParseZoneFromDni(dni)
-        if (!zoneNum) return
+        if (zoneNum) zoneNums << zoneNum
+    }
 
-        Map hint = hints["${zoneNum}"] ?: [:]
-        String hintedLabel = hint.label?.trim()
-        String hintedType  = canonicalType(hint.type?.trim())
-        String restLabel   = state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
+    zoneNums.each { Integer zoneNum ->
+        upsertDiscoveredZone(zoneNum, null, null)
+    }
+}
 
-        String desiredLabel = hintedLabel ?: restLabel ?: "Zone ${zoneNum}"
-        String desiredDriver = driverNameForType(
-            hintedType ?: inferTypeFromName(hintedLabel ?: restLabel) ?: settings.defaultUnknownZoneType ?: "contact"
-        )
-
-        boolean needsRecreate = false
-        String existingTypeName = null
-
+private String deviceTypeName(dev) {
+    try {
+        return dev.getTypeName()
+    } catch (ignored) {
         try {
-            existingTypeName = dev.getTypeName()
-        } catch (ignored) {
-            try {
-                existingTypeName = dev.typeName
-            } catch (ignored2) {
-            }
-        }
-
-        if (existingTypeName && existingTypeName != desiredDriver) {
-            needsRecreate = true
-        }
-
-        if (needsRecreate) {
-            try {
-                deleteChildDevice(dni)
-                addChildDevice(
-                    "uno",
-                    desiredDriver,
-                    dni,
-                    [
-                        name       : "UNO Zone ${zoneNum}",
-                        label      : desiredLabel,
-                        isComponent: true
-                    ]
-                )
-                logInfo("Recreated ${dni} as ${desiredDriver}")
-            } catch (e) {
-                log.warn "Could not recreate ${dni}: ${e}"
-            }
-        } else {
-            try {
-                if (dev.label != desiredLabel) {
-                    dev.setLabel(desiredLabel)
-                    logDebug("Relabeled ${dni} to ${desiredLabel}")
-                }
-            } catch (e) {
-                log.warn "Could not relabel ${dni}: ${e}"
-            }
+            return dev.typeName
+        } catch (ignored2) {
+            return null
         }
     }
+}
+
+// An explicit hint always wins. Otherwise a device still on the default driver may be upgraded from a
+// CID suggestion or its label; a device already on a specific driver is left alone to avoid flip-flopping.
+private String desiredDriverForExisting(String currentDriver, String hintedType, String suggestedType, String nameForInference) {
+    if (hintedType) return driverNameForType(canonicalType(hintedType))
+
+    String defaultDriver = driverNameForType(canonicalType(settings.defaultUnknownZoneType ?: "contact"))
+    if (currentDriver && currentDriver != defaultDriver) return currentDriver
+
+    String learned = suggestedType ?: inferTypeFromName(nameForInference)
+    return learned ? driverNameForType(canonicalType(learned)) : currentDriver
 }
 
 private void loadRestMetadata() {

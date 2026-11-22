@@ -8,6 +8,17 @@ metadata {
         attribute "connectionState", "string"
         attribute "alarmSystemStatus", "string"
         attribute "troubleState", "string"
+        attribute "troubleDetail", "string"
+        attribute "serviceRequired", "string"
+        attribute "acFailure", "string"
+        attribute "lowBattery", "string"
+        attribute "serverOffline", "string"
+        attribute "zoneTrouble", "string"
+        attribute "batteryOvercurrent", "string"
+        attribute "sirenFault", "string"
+        attribute "supervisoryFault", "string"
+        attribute "chime", "string"
+        attribute "lastChime", "string"
         attribute "panelModel", "string"
         attribute "firmwareVersion", "string"
         attribute "panelTime", "string"
@@ -22,6 +33,8 @@ metadata {
 
         command "armStay"
         command "armAway"
+        command "chimeOn"
+        command "chimeOff"
         command "disarm", [[name: "Master Code", type: "STRING"]]
         command "reconnect"
         command "refreshAll"
@@ -71,6 +84,7 @@ def initialize() {
     state.lastCidByZone = [:]
     state.lastCidEvent = ""
     state.restStartupDone = false
+    state.authFailed = false
 
     sendEvent(name: "connectionState", value: "disconnected")
     if (!device.currentValue("alarmSystemStatus")) sendEvent(name: "alarmSystemStatus", value: "unknown")
@@ -91,11 +105,14 @@ private void scheduleHealthChecks() {
         runEvery10Minutes("heartbeatCheck")
     }
 
-    runEvery30Minutes("watchdogCheck")
+    // The check runs every minute; the configured "no frames" threshold is applied inside watchdogCheck.
+    runEvery1Minute("watchdogCheck")
     logDebug("Scheduled heartbeat=${hb}m watchdog=${settings.watchdogMinutes ?: '3'}m")
 }
 
 def reconnect() {
+    unschedule("reconnect")
+
     try {
         interfaces.rawSocket.close()
     } catch (ignored) {
@@ -105,6 +122,9 @@ def reconnect() {
     state.loginSent = false
     state.commandInFlight = null
     state.restStartupDone = false
+    state.authFailed = false
+    state.rxBuffer = ""
+    state.lastReconnectTs = now()
 
     Integer p = safePort()
     logInfo("Opening raw socket to ${settings.ip}:${p}")
@@ -115,7 +135,13 @@ def reconnect() {
     } catch (Exception e) {
         log.error "Socket connect failed: ${e}"
         sendEvent(name: "connectionState", value: "error")
+        scheduleReconnect(30)
     }
+}
+
+private void scheduleReconnect(Integer seconds) {
+    logDebug("Reconnect scheduled in ${seconds}s")
+    runIn(seconds, "reconnect")
 }
 
 def socketStatus(String message) {
@@ -123,18 +149,22 @@ def socketStatus(String message) {
 
     String m = (message ?: "").toLowerCase()
 
-    if (m.contains("connect")) {
-        sendEvent(name: "connectionState", value: "connected")
-        return
-    }
-
-    if (m.contains("close") || m.contains("disconnected") || m.contains("error") || m.contains("failure")) {
+    // Check failure words first: "disconnected" and "failed to connect" both contain "connect".
+    if (m.contains("close") || m.contains("disconnect") || m.contains("error") || m.contains("fail")) {
         logWarn("Socket disconnected: ${message}")
-        sendEvent(name: "connectionState", value: "disconnected")
+        if (!state.authFailed) {
+            sendEvent(name: "connectionState", value: "disconnected")
+        }
         state.loggedIn = false
         state.loginSent = false
         state.commandInFlight = null
-        runIn(5, "reconnect")
+        // Back off after a rejected password so retries can't lock the panel out.
+        scheduleReconnect(state.authFailed ? 300 : 5)
+        return
+    }
+
+    if (m.contains("open") || m.contains("connect")) {
+        sendEvent(name: "connectionState", value: "connected")
     }
 }
 
@@ -154,13 +184,15 @@ def refresh() {
 }
 
 def refreshAll() {
-    logDebug("Sending refreshAll")
-    rawSend(tpiCommand("0C", "") + "\r\n")
+    logDebug("Queueing refreshAll")
+    enqueueCommand("0C", "", "refreshAll")
 }
 
 def poll() {
-    logDebug("Sending poll")
-    rawSend(tpiCommand("00", "") + "\r\n")
+    // Any in-flight command or its ack already proves the link is alive.
+    if (state.commandInFlight) return
+    logDebug("Queueing poll")
+    enqueueCommand("00", "", "poll")
 }
 
 def armStay() {
@@ -171,10 +203,24 @@ def armAway() {
     enqueueCommand("09", "1", "armAway")
 }
 
+// TPI command 10: <partition>,<0|1>. Not available on EVL4MAX-SA / DUO-SA.
+def chimeOn() {
+    enqueueCommand("10", "1,1", "chimeOn")
+}
+
+def chimeOff() {
+    enqueueCommand("10", "1,0", "chimeOff")
+}
+
 def disarm(String suppliedCode = null) {
-    String code = suppliedCode ?: settings.masterCode
+    String code = (suppliedCode ?: settings.masterCode)?.toString()?.trim()
     if (!code) {
         log.warn "Disarm requested without master code"
+        return
+    }
+    // TPI command 12 takes a 4 to 6 digit code; reject anything else so it can't corrupt the packet.
+    if (!(code ==~ /\d{4,6}/)) {
+        log.warn "Disarm code must be 4 to 6 digits"
         return
     }
     enqueueCommand("12", "1,${code}", "disarm")
@@ -193,11 +239,24 @@ def heartbeatCheck() {
 }
 
 def watchdogCheck() {
-    long lastTs = (state.lastFrameTs ?: 0L) as Long
-    Integer wdMinutes = safeInt(settings.watchdogMinutes, 3)
+    String cs = device.currentValue("connectionState")
 
-    if (device.currentValue("connectionState") != "authenticated") return
+    if (cs != "authenticated") {
+        // Safety net for a connection that never recovered; auth failures retry on their own back-off.
+        if (state.authFailed) return
+        long sinceAttemptMs = now() - ((state.lastReconnectTs ?: 0L) as Long)
+        if (sinceAttemptMs > 120000L) {
+            logWarn("Watchdog reconnect: connection state is ${cs}")
+            reconnect()
+        }
+        return
+    }
+
+    long lastTs = (state.lastFrameTs ?: 0L) as Long
     if (lastTs == 0L) return
+
+    // Never trip faster than the heartbeat, or an idle panel would be reconnected needlessly.
+    Integer wdMinutes = Math.max(safeInt(settings.watchdogMinutes, 3), safeInt(settings.heartbeatMinutes, 1) + 1)
 
     long ageSeconds = (now() - lastTs) / 1000L
     if (ageSeconds > (wdMinutes * 60)) {
@@ -233,8 +292,9 @@ private Integer safeParseInt(String s, Integer fallback = 0) {
 }
 
 private Integer configuredZoneCount() {
+    // The UNO supports up to 128 zones (TPI command 01 carries a 128 bit field).
     try {
-        return (settings.zoneCount ?: 27) as Integer
+        return Math.min(Math.max((settings.zoneCount ?: 27) as Integer, 1), 128)
     } catch (ignored) {
         return 27
     }
@@ -323,10 +383,18 @@ def parse(String message) {
 
     state.rxBuffer = (state.rxBuffer ?: "") + decoded
 
-    if (!state.loggedIn && !state.loginSent && state.rxBuffer.contains("Login:")) {
-        logInfo("UNO presented login prompt")
-        sendEvent(name: "connectionState", value: "loginPrompt")
-        login()
+    // The prompt has no terminator, so drop it from the buffer or it would prefix the "OK" reply.
+    if (!state.loggedIn && !state.loginSent) {
+        String rx = state.rxBuffer
+        int idx = rx.toLowerCase().indexOf("login")
+        if (idx >= 0) {
+            int end = idx + 5
+            if (rx.length() > end && rx.substring(end, end + 1) == ":") end++
+            state.rxBuffer = rx.substring(end)
+            logInfo("UNO presented login prompt")
+            sendEvent(name: "connectionState", value: "loginPrompt")
+            login()
+        }
     }
 
     while (true) {
@@ -343,6 +411,15 @@ def parse(String message) {
         state.rxBuffer = buffer.substring(endIdx + 1)
 
         if (frame) parseFrame(frame)
+    }
+
+    // Login replies are plain words; accept them even if the panel doesn't terminate them.
+    if (state.loginSent && !state.loggedIn) {
+        String pending = (state.rxBuffer ?: "").trim()
+        if (pending.equalsIgnoreCase("OK") || pending.equalsIgnoreCase("FAILED") || pending.equalsIgnoreCase("Timed Out!") || pending.equalsIgnoreCase("Timed Out")) {
+            state.rxBuffer = ""
+            parseFrame(pending)
+        }
     }
 }
 
@@ -369,6 +446,7 @@ private void parseFrame(String frame) {
     if (frame.equalsIgnoreCase("OK")) {
         state.loggedIn = true
         state.loginSent = false
+        state.authFailed = false
         logInfo("UNO login successful")
         sendEvent(name: "connectionState", value: "authenticated")
 
@@ -380,8 +458,8 @@ private void parseFrame(String frame) {
             }
         }
 
-        rawSend(tpiCommand("0D", "") + "\r\n")
-        rawSend(tpiCommand("0C", "") + "\r\n")
+        // The panel sends host information (%05) on its own after login, so only request the state dump.
+        enqueueCommand("0C", "", "refreshAll")
         processQueue()
         return
     }
@@ -389,8 +467,10 @@ private void parseFrame(String frame) {
     if (frame.equalsIgnoreCase("FAILED")) {
         state.loggedIn = false
         state.loginSent = false
+        state.authFailed = true
         logWarn("UNO login failed")
         sendEvent(name: "connectionState", value: "auth_failed")
+        scheduleReconnect(300)
         return
     }
 
@@ -398,6 +478,7 @@ private void parseFrame(String frame) {
         state.loginSent = false
         logWarn("UNO login timed out")
         sendEvent(name: "connectionState", value: "loginTimedOut")
+        scheduleReconnect(30)
         return
     }
 
@@ -476,10 +557,9 @@ def restStartupSync() {
             if (!(z instanceof Map)) return
             Integer zoneNum = safeInt(z["n"], 0)
             Integer t = safeInt(z["t"], 0)
-            if (zoneNum <= 0) return
+            if (zoneNum <= 0 || zoneNum > configuredZoneCount()) return
 
             boolean active = isRestZoneActive(t)
-            parent?.upsertDiscoveredZone(zoneNum, null, null)
             routeZoneUpdate(zoneNum, active, active ? "1" : "0")
         }
     }
@@ -547,18 +627,39 @@ private void parseAckFrame(String frame) {
     String cc = parts[0]
     String ee = parts[1]
 
+    Integer code = safeParseInt(ee, -1)
     String ack = cc + "," + ee
     sendEvent(name: "lastAck", value: ack)
     logDebug("ACK: ${ack}")
 
-    if (state.commandInFlight) {
-        if (ee != "00" && ee != "0") {
-            logWarn("Command returned code ${ee} for ${state.commandInFlight.name}")
-        }
-        state.commandInFlight = null
+    def inflight = state.commandInFlight
+    // The ack echoes the command it answers; ignore acks for anything other than the in-flight command.
+    if (!inflight || !cc.equalsIgnoreCase(inflight.cc as String)) {
+        return
     }
 
+    if (code != 0) {
+        logWarn("Command ${inflight.name} rejected: ${tpiResponseText(code)} (code ${ee})")
+        sendEvent(name: "lastAck", value: "error:${inflight.name}:${ee}", isStateChange: true)
+    } else if (inflight.name == "chimeOn" || inflight.name == "chimeOff") {
+        // The TPI doesn't report chime state, so this reflects the last accepted command.
+        sendEvent(name: "chime", value: inflight.name == "chimeOn" ? "on" : "off")
+    }
+    state.commandInFlight = null
+
     processQueue()
+}
+
+private String tpiResponseText(Integer code) {
+    switch (code) {
+        case 1: return "receive buffer overrun"
+        case 2: return "unknown command"
+        case 3: return "syntax error"
+        case 6: return "command cannot be completed (e.g. partition not ready or already armed)"
+        case 7: return "invalid user code"
+        case 8: return "partition, zone or PGM out of range"
+        default: return "unknown response"
+    }
 }
 
 private void handleZoneBitmap(List<String> parts) {
@@ -573,8 +674,8 @@ private void handleZoneBitmap(List<String> parts) {
     Map<Integer, Boolean> currentMap = decodeZoneBitmap(bitmapHex)
     Map<Integer, Boolean> previousMap = previous ? decodeZoneBitmap(previous) : [:]
 
-    int absoluteMax = currentMap.keySet()?.max() ?: configuredZoneCount()
-    int loopMax = previous == null ? configuredZoneCount() : absoluteMax
+    // Bitmaps are padded to whole bytes; only the configured zones are real.
+    int loopMax = configuredZoneCount()
 
     for (int zone = 1; zone <= loopMax; zone++) {
         boolean newState = currentMap.get(zone, false)
@@ -599,7 +700,6 @@ private void handleZoneBitmap(List<String> parts) {
                 logDebug("Zone ${zone} -> ${newState ? 'active/open' : 'inactive/closed'}")
             }
 
-            parent?.upsertDiscoveredZone(zone, null, null)
             emitZoneFastEvent(zone, newState)
             routeZoneUpdate(zone, newState, newState ? "1" : "0")
         }
@@ -656,7 +756,8 @@ private String decodePartitionStatus(String bitmap) {
         case "09": return "armedAwayZeroEntry"
         case "0C": return "entryDelay"
         case "11": return "alarm"
-        default:   return "unknown"
+        // Other values are transitory states, which the spec says to treat as busy.
+        default:   return "busy"
     }
 }
 
@@ -681,17 +782,17 @@ private void handleCidEvent(List<String> parts) {
     sendEvent(name: "lastCidEvent", value: summary.take(1024))
     logDebug(summary)
 
-    if (zone <= 0) return
-
-    String suggestedType = suggestTypeFromCid(eventCode)
-    parent?.upsertDiscoveredZone(zone, suggestedType, null)
+    if (zone <= 0 || zone > configuredZoneCount()) return
 
     Set<String> fastPathZoneCodes = [
         "110", "113", "130", "131", "132", "134", "137", "144", "154", "162"
     ] as Set
 
+    // Only zone-type codes carry a zone number; for others (e.g. arm/disarm) it is a user ID.
     if (!fastPathZoneCodes.contains(eventCode)) return
     if (!(isEvent || isRestore)) return
+
+    parent?.upsertDiscoveredZone(zone, suggestTypeFromCid(eventCode), null)
 
     boolean active = isEvent && !isRestore
 
@@ -726,11 +827,13 @@ private void handleBypassBitmap(List<String> parts) {
 private void handlePanelInfo(List<String> parts) {
     if (parts.size() < 6) return
 
+    // %05,MAC,TYPE,VERSION,PARTITION,TIME - the version string may itself contain commas,
+    // so anchor on the fixed fields at both ends.
     String mac = cleanPayload(parts[1])
     String model = cleanPayload(parts[2])
-    String fw = cleanPayload(parts[3]).trim()
-    String defaultPartition = cleanPayload(parts[4])
-    String panelTime = cleanPayload(parts[5])
+    String panelTime = cleanPayload(parts[parts.size() - 1])
+    String defaultPartition = cleanPayload(parts[parts.size() - 2])
+    String fw = parts.subList(3, parts.size() - 2).collect { cleanPayload(it) }.join(",").trim()
 
     if (mac) sendEvent(name: "panelMac", value: mac)
     if (model) sendEvent(name: "panelModel", value: model)
@@ -746,10 +849,49 @@ private void handleTroubleBitmap(List<String> parts) {
     String bitmap = cleanPayload(parts[1]).toUpperCase()
     state.lastTroubleBitmap = bitmap
 
-    String trouble = (bitmap == ("0" * bitmap.length())) ? "clear" : "trouble"
+    // %06 carries one trouble byte per partition; this integration tracks partition 1 (first byte).
+    if (bitmap.length() < 2) return
+    Integer bits = safeParseHex(bitmap.substring(0, 2), 0)
+
+    // Spec section 3.5: BIT 1..8 map to the low..high bit of the byte.
+    List<Map> troubles = [
+        [attr: "serviceRequired",     text: "Service required"],
+        [attr: "acFailure",           text: "AC failure"],
+        [attr: "lowBattery",          text: "Wireless device low battery"],
+        [attr: "serverOffline",       text: "Server offline"],
+        [attr: "zoneTrouble",         text: "Zone trouble (fault/tamper)"],
+        [attr: "batteryOvercurrent",  text: "System battery overcurrent"],
+        [attr: "sirenFault",          text: "Bell/siren absent or faulted"],
+        [attr: "supervisoryFault",    text: "Wireless device supervisory fault"]
+    ]
+
+    List<String> active = []
+    troubles.eachWithIndex { Map t, int idx ->
+        boolean on = ((bits >> idx) & 0x01) == 1
+        if (on) active << (t.text as String)
+        String value = on ? "active" : "clear"
+        if (value != device.currentValue(t.attr as String)) {
+            sendEvent(name: t.attr, value: value, descriptionText: "${t.text} ${value}")
+        }
+    }
+
+    String detail = active ? active.join(", ") : "none"
+    if (detail != device.currentValue("troubleDetail")) {
+        sendEvent(name: "troubleDetail", value: detail)
+    }
+
+    String trouble = active ? "trouble" : "clear"
     if (trouble != device.currentValue("troubleState")) {
         sendEvent(name: "troubleState", value: trouble)
-        logInfo("Trouble state -> ${trouble}")
+        logInfo("Trouble state -> ${trouble}: ${detail}")
+    }
+}
+
+private Integer safeParseHex(String s, Integer fallback = 0) {
+    try {
+        return Integer.parseInt(s, 16)
+    } catch (ignored) {
+        return fallback
     }
 }
 
@@ -764,7 +906,14 @@ private void handlePersistentSound(List<String> parts) {
 }
 
 private void handleChime(List<String> parts) {
-    logDebug("Chime frame received")
+    // %10 carries one chime-type digit (0-7) per partition; 0 means no chime for that partition.
+    String payload = parts.size() > 1 ? cleanPayload(parts[1]) : ""
+    String type = payload ? payload.substring(0, 1) : "0"
+    logDebug("Chime frame received: ${payload}")
+
+    if (type != "0") {
+        sendEvent(name: "lastChime", value: "type ${type}", isStateChange: true)
+    }
 }
 
 private void emitZoneFastEvent(Integer zoneNum, boolean active) {
@@ -784,8 +933,22 @@ private void emitZoneFastEvent(Integer zoneNum, boolean active) {
 private void routeZoneUpdate(Integer zoneNum, boolean active, String digit) {
     String dni = "uno-zone-${zoneNum}"
 
-    parent?.upsertDiscoveredZone(zoneNum, null, null)
+    def child = findZoneChild(dni)
 
+    if (!child) {
+        parent?.upsertDiscoveredZone(zoneNum, null, null)
+        child = findZoneChild(dni)
+    }
+
+    if (!child) {
+        logWarn("Zone ${zoneNum} device not found via parent app: ${dni}")
+        return
+    }
+
+    updateZoneChild(child, zoneNum, active, digit)
+}
+
+private findZoneChild(String dni) {
     def child = null
     try {
         child = parent?.getChildDevice(dni)
@@ -799,12 +962,7 @@ private void routeZoneUpdate(Integer zoneNum, boolean active, String digit) {
         }
     }
 
-    if (!child) {
-        logWarn("Zone ${zoneNum} device not found via parent app: ${dni}")
-        return
-    }
-
-    updateZoneChild(child, zoneNum, active, digit)
+    return child
 }
 
 private void updateZoneChild(child, Integer zoneNum, boolean active, String digit) {

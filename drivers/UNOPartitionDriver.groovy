@@ -11,6 +11,8 @@ metadata {
         command "armStay"
         command "armAway"
         command "disarm", [[name: "Code", type: "STRING"]]
+        command "chimeOn"
+        command "chimeOff"
         command "off"
         command "strobe"
         command "siren"
@@ -30,6 +32,8 @@ def armStay() { parent?.armStay(); sendEvent(name: "lastUserAction", value: "arm
 def armAway() { parent?.armAway(); sendEvent(name: "lastUserAction", value: "armAway", isStateChange: true) }
 def disarm(String code = null) { parent?.disarm(code); sendEvent(name: "lastUserAction", value: "disarm", isStateChange: true) }
 def off() { disarm() }
+def chimeOn() { parent?.chimeOn() }
+def chimeOff() { parent?.chimeOff() }
 def strobe() {}
 def siren() {}
 def both() {}
@@ -47,9 +51,11 @@ private String mapSecurityState(String state) {
         case "disarmed": return "disarmed"
         case "armedStay": return "armed home"
         case "armedAway": return "armed away"
+        case "armedAwayZeroEntry": return "armed away"
         case "alarm": return "alarm"
         case "entryDelay":
         case "exitDelay": return "arming"
+        case "busy": return "busy"
         case "notReady": return "not ready"
         default: return state ?: "unknown"
     }

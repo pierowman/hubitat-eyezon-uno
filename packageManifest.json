@@ -4,15 +4,16 @@
   "author": "Eric Hess",
   "version": "1.1.0",
   "dateReleased": "2026-03-16",
-  "documentationLink": "https://github.com/ericallenhess/hubitat-eyezon-uno",
+  "documentationLink": "https://github.com/pierowman/hubitat-eyezon-uno",
   "communityLink": "https://community.hubitat.com/",
-  "releaseNotes": "Added optional UNO REST integration for automatic zone labels, partition label, system name, and startup zone-state synchronization. TPI remains the real-time event and control path."  "licenseFile": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/LICENSE",
+  "releaseNotes": "Added optional UNO REST integration for automatic zone labels, partition label, system name, and startup zone-state synchronization. TPI remains the real-time event and control path.",
+  "licenseFile": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/LICENSE",
   "apps": [
     {
       "id": "uno-app-0001",
       "name": "EyezOn UNO Integration",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/apps/UNOIntegrationApp.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/apps/UNOIntegrationApp.groovy",
       "required": true,
       "oauth": false
     }
@@ -22,49 +23,49 @@
       "id": "uno-driver-connection-0001",
       "name": "UNO Connection",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOConnectionDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOConnectionDriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-partition-0001",
       "name": "UNO Partition",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOPartitionDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOPartitionDriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-zone-contact-0001",
       "name": "UNO Zone Contact",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOZoneContactDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneContactDriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-zone-motion-0001",
       "name": "UNO Zone Motion",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOZoneMotionDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneMotionDriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-zone-smoke-0001",
       "name": "UNO Zone Smoke",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOZoneSmokeDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneSmokeDriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-zone-co-0001",
       "name": "UNO Zone CO",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOZoneCODriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneCODriver.groovy",
       "required": true
     },
     {
       "id": "uno-driver-zone-water-0001",
       "name": "UNO Zone Water",
       "namespace": "uno",
-      "location": "https://raw.githubusercontent.com/<your-github-username>/hubitat-eyezon-uno/main/drivers/UNOZoneWaterDriver.groovy",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneWaterDriver.groovy",
       "required": true
     }
   ]

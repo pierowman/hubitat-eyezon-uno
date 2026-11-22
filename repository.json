@@ -2,7 +2,7 @@
   "packages": [
     {
       "name": "EyezOn UNO Hubitat Integration",
-      "location": "https://raw.githubusercontent.com/ericallenhess/hubitat-eyezon-uno/main/packageManifest.json"
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/packageManifest.json"
     }
   ]
 }
