@@ -9,6 +9,7 @@ metadata {
         attribute "alarmSystemStatus", "string"
         attribute "troubleState", "string"
         attribute "troubleDetail", "string"
+        attribute "acPower", "string"
         attribute "serviceRequired", "string"
         attribute "acFailure", "string"
         attribute "lowBattery", "string"
@@ -35,6 +36,12 @@ metadata {
         command "armAway"
         command "chimeOn"
         command "chimeOff"
+        command "bypassZone", [[name: "Zone", type: "NUMBER"]]
+        command "unbypassZone", [[name: "Zone", type: "NUMBER"]]
+        command "bypassOpenZones", [[name: "Partition", type: "NUMBER"]]
+        command "unbypassAllZones", [[name: "Partition", type: "NUMBER"]]
+        command "sendKeys", [[name: "Keys (0-9 * #)", type: "STRING"], [name: "Partition", type: "NUMBER"]]
+        command "panic", [[name: "Type", type: "ENUM", constraints: ["fire", "medical", "police"]], [name: "Partition", type: "NUMBER"]]
         command "disarm", [[name: "Master Code", type: "STRING"]]
         command "reconnect"
         command "refreshAll"
@@ -51,6 +58,8 @@ metadata {
         input name: "restUsername", type: "text", title: "UNO REST Username", defaultValue: "user", required: false
         input name: "masterCode", type: "text", title: "UNO Master Code", required: false
         input name: "zoneCount", type: "number", title: "Configured Zone Count", defaultValue: 27, required: true
+        input name: "zoneSet", type: "text", title: "Zone set (optional, e.g. 1-8,12,20-27; overrides zone count)", required: false
+        input name: "enablePanic", type: "bool", title: "Allow panic commands (contacts emergency services if the UNO is monitored)", defaultValue: false
         input name: "useRestMetadata", type: "bool", title: "Enable REST metadata/startup sync", defaultValue: true
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
         input name: "traceLogging", type: "bool", title: "Enable trace logging", defaultValue: false
@@ -76,6 +85,8 @@ def initialize() {
     state.commandInFlight = null
     state.lastZoneBitmap = null
     state.lastPartitionBitmap = null
+    state.partitionStatus = [:]
+    state.troubleBytes = [:]
     state.lastBypassBitmap = null
     state.lastTroubleBitmap = null
     state.loggedIn = false
@@ -85,6 +96,10 @@ def initialize() {
     state.lastCidEvent = ""
     state.restStartupDone = false
     state.authFailed = false
+
+    Map zoneSelection = parseRange(settings.zoneSet, 1, 128)
+    if (zoneSelection.invalid) logWarn("Ignoring invalid zone set entries: ${zoneSelection.invalid.join(', ')}")
+    if (settings.zoneSet && !zoneSelection.values) logWarn("Zone set has no valid zones; using zone count ${configuredZoneCount()}")
 
     sendEvent(name: "connectionState", value: "disconnected")
     if (!device.currentValue("alarmSystemStatus")) sendEvent(name: "alarmSystemStatus", value: "unknown")
@@ -174,6 +189,13 @@ def login() {
         return
     }
 
+    // Outside a ^...$ packet the TPI treats 0-9, * and # as keypad keystrokes (spec 3.1), so a password
+    // sent after login would be typed into the panel.
+    if (state.loggedIn) {
+        logWarn("Already logged in; not sending the password")
+        return
+    }
+
     logInfo("Sending UNO login password")
     state.loginSent = true
     rawSend(settings.password + "\r")
@@ -195,24 +217,35 @@ def poll() {
     enqueueCommand("00", "", "poll")
 }
 
-def armStay() {
-    enqueueCommand("08", "1", "armStay")
+def armStay(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("08", "${p}", "armStay")
 }
 
-def armAway() {
-    enqueueCommand("09", "1", "armAway")
+def armAway(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("09", "${p}", "armAway")
 }
 
 // TPI command 10: <partition>,<0|1>. Not available on EVL4MAX-SA / DUO-SA.
-def chimeOn() {
-    enqueueCommand("10", "1,1", "chimeOn")
+def chimeOn(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("10", "${p},1", "chimeOn", [partition: p])
 }
 
-def chimeOff() {
-    enqueueCommand("10", "1,0", "chimeOff")
+def chimeOff(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("10", "${p},0", "chimeOff", [partition: p])
 }
 
-def disarm(String suppliedCode = null) {
+def disarm(String suppliedCode = null, def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+
     String code = (suppliedCode ?: settings.masterCode)?.toString()?.trim()
     if (!code) {
         log.warn "Disarm requested without master code"
@@ -223,7 +256,72 @@ def disarm(String suppliedCode = null) {
         log.warn "Disarm code must be 4 to 6 digits"
         return
     }
-    enqueueCommand("12", "1,${code}", "disarm")
+    enqueueCommand("12", "${p},${code}", "disarm", [log: "${p},${'*' * code.length()}"])
+}
+
+// TPI commands 04/05: 3 digit zone number.
+def bypassZone(def zone) {
+    Integer z = normalizeZone(zone)
+    if (z == null) return
+    enqueueCommand("04", z.toString().padLeft(3, "0"), "bypassZone")
+}
+
+def unbypassZone(def zone) {
+    Integer z = normalizeZone(zone)
+    if (z == null) return
+    enqueueCommand("05", z.toString().padLeft(3, "0"), "unbypassZone")
+}
+
+// TPI commands 06/07: bypass all open zones / un-bypass all zones in a partition.
+def bypassOpenZones(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("06", "${p}", "bypassOpenZones")
+}
+
+def unbypassAllZones(def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    enqueueCommand("07", "${p}", "unbypassAllZones")
+}
+
+// TPI command 03 sends one key per command, so each key is queued and acknowledged on its own.
+def sendKeys(String keys, def partition = 1) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+
+    String k = (keys ?: "").replaceAll("\\s", "")
+    if (!(k ==~ /[0-9*#]{1,12}/)) {
+        log.warn "Keys must be 1 to 12 characters from 0-9, * and #"
+        return
+    }
+
+    for (int i = 0; i < k.length(); i++) {
+        // Keys may contain a user code, so never log them.
+        enqueueCommand("03", "${p},${k.substring(i, i + 1)}", "keypress", [log: "${p},*"])
+    }
+}
+
+// TPI command 11. Disabled unless explicitly enabled because a monitored panel dispatches emergency services.
+def panic(String type, def partition = 1) {
+    if (settings.enablePanic != true) {
+        logWarn("Panic request ignored: enable 'Allow panic commands' in the app first")
+        return
+    }
+
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+
+    Map codes = [fire: "0", medical: "1", ambulance: "1", police: "2"]
+    String t = codes[(type ?: "").toString().toLowerCase().trim()]
+    if (t == null) {
+        log.warn "Unknown panic type '${type}' (use fire, medical or police)"
+        return
+    }
+
+    logWarn("PANIC requested: ${type} on partition ${p}")
+    // Jump the queue and never resend automatically.
+    enqueueCommand("11", "${p},${t}", "panic:${type}", [noRetry: true, priority: true])
 }
 
 def clearCommandQueue() {
@@ -300,13 +398,86 @@ private Integer configuredZoneCount() {
     }
 }
 
+// Zones this integration manages: the zone set if one is configured, otherwise 1..zone count.
+private List<Integer> configuredZones() {
+    Map parsed = parseRange(settings.zoneSet, 1, 128)
+    if (parsed.values) return parsed.values
+    return (1..configuredZoneCount()).collect { it as Integer }
+}
+
+// Parses "1-3,7,10-12" into sorted unique numbers within min..max; anything else is reported in invalid.
+private Map parseRange(def spec, Integer min, Integer max) {
+    Set<Integer> values = new TreeSet<Integer>()
+    List<String> invalid = []
+
+    String text = (spec ?: "").toString().replaceAll("\\s", "")
+    if (!text) return [values: [], invalid: invalid]
+
+    text.split(",").each { String token ->
+        if (!token) return
+        def m = (token =~ /^(\d+)(?:-(\d+))?$/)
+        if (!m.matches()) {
+            invalid << token
+            return
+        }
+        int lo = Integer.parseInt(m.group(1))
+        int hi = m.group(2) != null ? Integer.parseInt(m.group(2)) : lo
+        if (lo > hi || lo < min || hi > max) {
+            invalid << token
+            return
+        }
+        (lo..hi).each { values << it }
+    }
+
+    return [values: values as List<Integer>, invalid: invalid]
+}
+
+private Integer normalizePartition(def partition) {
+    Integer p = (partition == null || partition == "") ? 1 : safeInt(partition, -1)
+    if (p < 1 || p > 8) {
+        logWarn("Partition must be 1 to 8 (got '${partition}')")
+        return null
+    }
+    return p
+}
+
+private Integer normalizeZone(def zone) {
+    Integer z = safeInt(zone, -1)
+    if (z < 1 || z > 128) {
+        logWarn("Zone must be 1 to 128 (got '${zone}')")
+        return null
+    }
+    return z
+}
+
+// Masks the TPI password and master code wherever they appear in text that is about to be logged.
+private String redact(String text) {
+    String out = text ?: ""
+    [settings.password, settings.masterCode].each { secret ->
+        String s = secret?.toString()
+        if (s) out = out.replace(s, "*" * s.length())
+    }
+    return out
+}
+
 private String tpiCommand(String cc, String data = "") {
     return "^" + cc + "," + (data ?: "") + '$'
 }
 
-private void enqueueCommand(String cc, String data, String name) {
+private void enqueueCommand(String cc, String data, String name, Map opts = [:]) {
     state.commandQueue = state.commandQueue ?: []
-    state.commandQueue << [cc: cc, data: (data ?: ""), name: name, ts: now()]
+
+    Map entry = [cc: cc, data: (data ?: ""), name: name, ts: now()]
+    ["log", "noRetry", "partition"].each { String key ->
+        if (opts[key] != null) entry[key] = opts[key]
+    }
+
+    if (opts.priority) {
+        state.commandQueue.add(0, entry)
+    } else {
+        state.commandQueue << entry
+    }
+
     logDebug("Queued ${name}")
     processQueue()
 }
@@ -328,16 +499,20 @@ private void processQueue() {
 
     def next = state.commandQueue.remove(0)
     state.commandInFlight = [
-        cc     : next.cc,
-        data   : next.data,
-        name   : next.name,
-        sentAt : now(),
-        retries: 0
+        cc       : next.cc,
+        data     : next.data,
+        name     : next.name,
+        log      : next.log,
+        noRetry  : next.noRetry,
+        partition: next.partition,
+        sentAt   : now(),
+        retries  : 0
     ]
 
     String cmd = tpiCommand(next.cc as String, next.data as String)
+    String logCmd = tpiCommand(next.cc as String, (next.log ?: next.data) as String)
     logInfo("Sending ${next.name}")
-    rawSend(cmd + "\r\n")
+    rawSend(cmd + "\r\n", logCmd + "\r\n")
     runIn(4, "commandTimeoutCheck")
 }
 
@@ -348,26 +523,27 @@ def commandTimeoutCheck() {
     long ageMs = now() - (inflight.sentAt as Long)
     if (ageMs < 3500L) return
 
-    if ((inflight.retries as Integer) < 1) {
+    if (!inflight.noRetry && (inflight.retries as Integer) < 1) {
         inflight.retries = ((inflight.retries as Integer) + 1)
         inflight.sentAt = now()
         state.commandInFlight = inflight
 
         String retryCmd = tpiCommand(inflight.cc as String, inflight.data as String)
+        String retryLog = tpiCommand(inflight.cc as String, (inflight.log ?: inflight.data) as String)
         logWarn("Retrying ${inflight.name}")
-        rawSend(retryCmd + "\r\n")
+        rawSend(retryCmd + "\r\n", retryLog + "\r\n")
         runIn(4, "commandTimeoutCheck")
     } else {
-        logWarn("Command timeout: ${inflight.name}")
+        logWarn("Command timeout: ${inflight.name}" + (inflight.noRetry ? " (not retried)" : ""))
         sendEvent(name: "lastAck", value: "timeout:${inflight.name}")
         state.commandInFlight = null
         processQueue()
     }
 }
 
-private void rawSend(String msg) {
+private void rawSend(String msg, String logMsg = null) {
     if (settings.traceLogging) {
-        log.debug "TX >>> ${msg}"
+        log.debug "TX >>> ${logMsg ?: redact(msg)}"
     }
     interfaces.rawSocket.sendMessage(msg)
 }
@@ -410,7 +586,14 @@ def parse(String message) {
         String frame = buffer.substring(0, endIdx).trim()
         state.rxBuffer = buffer.substring(endIdx + 1)
 
-        if (frame) parseFrame(frame)
+        if (frame) {
+            // One bad frame must not stop the rest of the buffer from being processed.
+            try {
+                parseFrame(frame)
+            } catch (Exception e) {
+                logWarn("Error handling frame '${redact(frame).take(80)}': ${e}")
+            }
+        }
     }
 
     // Login replies are plain words; accept them even if the panel doesn't terminate them.
@@ -538,26 +721,37 @@ private void parseFrame(String frame) {
 def restStartupSync() {
     if (!settings.useRestMetadata || !settings.ip || !settings.password) return
 
-    Map snapshot = restGetJson("A")
+    Map snapshot = null
+    try {
+        snapshot = restGetJson("A")
+    } catch (Exception e) {
+        noteRestFailure(e)
+        return
+    }
     if (!snapshot) return
 
     def partitions = snapshot["partitions"] instanceof List ? snapshot["partitions"] : []
-    if (partitions && partitions[0] instanceof Map) {
-        Integer pStatus = safeInt(partitions[0]["status"], -1)
+    partitions.eachWithIndex { def part, int idx ->
+        if (!(part instanceof Map) || idx >= 8) return
+        Integer pStatus = safeInt(part["status"], -1)
         String mapped = mapRestPartitionStatus(pStatus)
-        if (mapped) {
-            sendEvent(name: "alarmSystemStatus", value: mapped)
-            parent?.notifyPartitionState(mapped)
-        }
+        if (!mapped) return
+
+        Integer partitionNum = idx + 1
+        if (partitionNum == 1) sendEvent(name: "alarmSystemStatus", value: mapped)
+        state.partitionStatus = state.partitionStatus ?: [:]
+        state.partitionStatus["${partitionNum}"] = mapped
+        parent?.notifyPartitionState(partitionNum, mapped)
     }
 
     def zoneStatus = snapshot["zoneStatus"] instanceof List ? snapshot["zoneStatus"] : []
     if (zoneStatus && zoneStatus[0] instanceof List) {
+        Set<Integer> zones = configuredZones() as Set<Integer>
         (zoneStatus[0] as List).each { z ->
             if (!(z instanceof Map)) return
             Integer zoneNum = safeInt(z["n"], 0)
             Integer t = safeInt(z["t"], 0)
-            if (zoneNum <= 0 || zoneNum > configuredZoneCount()) return
+            if (!zones.contains(zoneNum)) return
 
             boolean active = isRestZoneActive(t)
             routeZoneUpdate(zoneNum, active, active ? "1" : "0")
@@ -567,6 +761,23 @@ def restStartupSync() {
     state.restStartupDone = true
     sendEvent(name: "restStartupSync", value: "ok")
     logInfo("REST startup sync complete")
+}
+
+// A 401 means the REST credentials are wrong, which is worth calling out separately from "unreachable".
+private void noteRestFailure(Exception e) {
+    Integer status = null
+    try {
+        status = (e.hasProperty("statusCode") ? e.statusCode : e.response?.status) as Integer
+    } catch (ignored) {
+    }
+
+    if (status == 401) {
+        log.error "UNO rejected the REST credentials (HTTP 401). Check the REST username and the local password."
+        sendEvent(name: "restStartupSync", value: "auth_failed")
+    } else {
+        logWarn("REST startup sync failed: ${e}")
+        sendEvent(name: "restStartupSync", value: "failed")
+    }
 }
 
 private boolean isRestZoneActive(Integer t) {
@@ -643,7 +854,10 @@ private void parseAckFrame(String frame) {
         sendEvent(name: "lastAck", value: "error:${inflight.name}:${ee}", isStateChange: true)
     } else if (inflight.name == "chimeOn" || inflight.name == "chimeOff") {
         // The TPI doesn't report chime state, so this reflects the last accepted command.
-        sendEvent(name: "chime", value: inflight.name == "chimeOn" ? "on" : "off")
+        String chime = inflight.name == "chimeOn" ? "on" : "off"
+        Integer chimePartition = safeInt(inflight.partition, 1)
+        if (chimePartition == 1) sendEvent(name: "chime", value: chime)
+        parent?.notifyPartitionEvents(chimePartition, [[name: "chime", value: chime]])
     }
     state.commandInFlight = null
 
@@ -679,9 +893,7 @@ private void handleZoneBitmap(List<String> parts) {
     Map<Integer, Boolean> previousMap = previous ? decodeZoneBitmap(previous) : [:]
 
     // Bitmaps are padded to whole bytes; only the configured zones are real.
-    int loopMax = configuredZoneCount()
-
-    for (int zone = 1; zone <= loopMax; zone++) {
+    for (Integer zone : configuredZones()) {
         boolean newState = currentMap.get(zone, false)
         boolean oldState = previousMap.get(zone, false)
 
@@ -730,26 +942,39 @@ private Map<Integer, Boolean> decodeZoneBitmap(String hex) {
     return result
 }
 
+// %02 carries one status byte per partition (partition 1 first). Only changes are forwarded.
 private void handlePartitionFrame(List<String> parts) {
     if (parts.size() < 2) return
 
     String bitmap = cleanPayload(parts[1]).toUpperCase()
-    state.lastPartitionBitmap = bitmap
-
-    String status = decodePartitionStatus(bitmap)
-    if (status != device.currentValue("alarmSystemStatus")) {
-        sendEvent(name: "alarmSystemStatus", value: status)
-        logInfo("Alarm status -> ${status}")
+    if (!(bitmap ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed partition frame: ${bitmap.take(64)}")
+        return
     }
+    state.lastPartitionBitmap = bitmap
+    state.partitionStatus = state.partitionStatus ?: [:]
 
-    parent?.notifyPartitionState(status)
+    for (int idx = 0; idx < 8 && (idx * 2 + 2) <= bitmap.length(); idx++) {
+        Integer partition = idx + 1
+        String status = decodePartitionStatus(bitmap.substring(idx * 2, idx * 2 + 2))
+        if (status == state.partitionStatus["${partition}"]) continue
+
+        state.partitionStatus["${partition}"] = status
+        if (partition == 1 && status != device.currentValue("alarmSystemStatus")) {
+            sendEvent(name: "alarmSystemStatus", value: status)
+            logInfo("Alarm status -> ${status}")
+        } else if (partition != 1) {
+            logInfo("Partition ${partition} status -> ${status}")
+        }
+
+        parent?.notifyPartitionState(partition, status)
+    }
 }
 
-private String decodePartitionStatus(String bitmap) {
-    if (!bitmap || bitmap.length() < 2) return "unknown"
+private String decodePartitionStatus(String code) {
+    if (!code || code.length() < 2) return "unknown"
 
-    String p1 = bitmap.substring(0, 2)
-    switch (p1) {
+    switch (code.substring(0, 2)) {
         case "00": return "unused"
         case "01": return "disarmed"
         case "02": return "readyBypassed"
@@ -786,7 +1011,7 @@ private void handleCidEvent(List<String> parts) {
     sendEvent(name: "lastCidEvent", value: summary.take(1024))
     logDebug(summary)
 
-    if (zone <= 0 || zone > configuredZoneCount()) return
+    if (zone <= 0 || !configuredZones().contains(zone)) return
 
     Set<String> fastPathZoneCodes = [
         "110", "113", "130", "131", "132", "134", "137", "144", "154", "162"
@@ -821,11 +1046,45 @@ private String suggestTypeFromCid(String eventCode) {
     }
 }
 
+// %04 is a zone bitmap (same layout as %01) where a set bit means the zone is bypassed.
 private void handleBypassBitmap(List<String> parts) {
     if (parts.size() < 2) return
+
     String bitmap = cleanPayload(parts[1]).toUpperCase()
+    if (!(bitmap ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed bypass bitmap: ${bitmap.take(64)}")
+        return
+    }
+
+    String previous = state.lastBypassBitmap
     state.lastBypassBitmap = bitmap
-    logDebug("Bypass bitmap updated")
+
+    Map<Integer, Boolean> current = decodeZoneBitmap(bitmap)
+    Map<Integer, Boolean> before = previous ? decodeZoneBitmap(previous) : [:]
+
+    for (Integer zone : configuredZones()) {
+        boolean bypassed = current.get(zone, false)
+        if (previous == null || bypassed != before.get(zone, false)) {
+            if (previous != null) logInfo("Zone ${zone} ${bypassed ? 'bypassed' : 'no longer bypassed'}")
+            routeBypassUpdate(zone, bypassed)
+        }
+    }
+}
+
+// Bypass changes only update existing zone devices; they never create new ones.
+private void routeBypassUpdate(Integer zone, boolean bypassed) {
+    def child = findZoneChild("uno-zone-${zone}")
+    if (!child) return
+
+    try {
+        child.sendEvent(
+            name: "bypassed",
+            value: bypassed ? "true" : "false",
+            descriptionText: "Zone ${zone} ${bypassed ? 'bypassed' : 'not bypassed'}"
+        )
+    } catch (e) {
+        logDebug("Failed to update bypass state for zone ${zone}: ${e}")
+    }
 }
 
 private void handlePanelInfo(List<String> parts) {
@@ -847,18 +1106,9 @@ private void handlePanelInfo(List<String> parts) {
     logDebug("Panel info: model=${model}, fw=${fw}, partition=${defaultPartition}, mac=${mac}, time=${panelTime}")
 }
 
-private void handleTroubleBitmap(List<String> parts) {
-    if (parts.size() < 2) return
-
-    String bitmap = cleanPayload(parts[1]).toUpperCase()
-    state.lastTroubleBitmap = bitmap
-
-    // %06 carries one trouble byte per partition; this integration tracks partition 1 (first byte).
-    if (bitmap.length() < 2) return
-    Integer bits = safeParseHex(bitmap.substring(0, 2), 0)
-
-    // Spec section 3.5: BIT 1..8 map to the low..high bit of the byte.
-    List<Map> troubles = [
+// Spec section 3.5: BIT 1..8 map to the low..high bit of each partition's trouble byte.
+private List<Map> troubleDefinitions() {
+    return [
         [attr: "serviceRequired",     text: "Service required"],
         [attr: "acFailure",           text: "AC failure"],
         [attr: "lowBattery",          text: "Wireless device low battery"],
@@ -868,26 +1118,60 @@ private void handleTroubleBitmap(List<String> parts) {
         [attr: "sirenFault",          text: "Bell/siren absent or faulted"],
         [attr: "supervisoryFault",    text: "Wireless device supervisory fault"]
     ]
+}
 
+private Map troubleAttributes(Integer bits) {
+    Map attrs = [:]
     List<String> active = []
-    troubles.eachWithIndex { Map t, int idx ->
+
+    troubleDefinitions().eachWithIndex { Map t, int idx ->
         boolean on = ((bits >> idx) & 0x01) == 1
+        attrs[t.attr as String] = on ? "active" : "clear"
         if (on) active << (t.text as String)
-        String value = on ? "active" : "clear"
-        if (value != device.currentValue(t.attr as String)) {
-            sendEvent(name: t.attr, value: value, descriptionText: "${t.text} ${value}")
+    }
+
+    attrs.acPower = attrs.acFailure == "active" ? "failed" : "present"
+    attrs.troubleDetail = active ? active.join(", ") : "none"
+    attrs.troubleState = active ? "trouble" : "clear"
+    return attrs
+}
+
+// %06 carries one trouble byte per partition. Partition 1 is mirrored on this device; every
+// partition's device gets its own copy.
+private void handleTroubleBitmap(List<String> parts) {
+    if (parts.size() < 2) return
+
+    String bitmap = cleanPayload(parts[1]).toUpperCase()
+    if (!(bitmap ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed trouble frame: ${bitmap.take(64)}")
+        return
+    }
+    state.lastTroubleBitmap = bitmap
+    state.troubleBytes = state.troubleBytes ?: [:]
+
+    for (int idx = 0; idx < 8 && (idx * 2 + 2) <= bitmap.length(); idx++) {
+        Integer partition = idx + 1
+        String byteHex = bitmap.substring(idx * 2, idx * 2 + 2)
+        if (byteHex == state.troubleBytes["${partition}"]) continue
+        state.troubleBytes["${partition}"] = byteHex
+
+        Map attrs = troubleAttributes(safeParseHex(byteHex, 0))
+
+        if (partition == 1) {
+            String previousTrouble = device.currentValue("troubleState")
+            attrs.each { String name, String value ->
+                if (value != device.currentValue(name)) {
+                    sendEvent(name: name, value: value)
+                }
+            }
+            if (attrs.troubleState != previousTrouble) {
+                logInfo("Trouble state -> ${attrs.troubleState}: ${attrs.troubleDetail}")
+            }
+        } else if (attrs.troubleState == "trouble") {
+            logInfo("Partition ${partition} trouble: ${attrs.troubleDetail}")
         }
-    }
 
-    String detail = active ? active.join(", ") : "none"
-    if (detail != device.currentValue("troubleDetail")) {
-        sendEvent(name: "troubleDetail", value: detail)
-    }
-
-    String trouble = active ? "trouble" : "clear"
-    if (trouble != device.currentValue("troubleState")) {
-        sendEvent(name: "troubleState", value: trouble)
-        logInfo("Trouble state -> ${trouble}: ${detail}")
+        parent?.notifyPartitionEvents(partition, attrs.collect { String name, String value -> [name: name, value: value] })
     }
 }
 
@@ -912,11 +1196,16 @@ private void handlePersistentSound(List<String> parts) {
 private void handleChime(List<String> parts) {
     // %10 carries one chime-type digit (0-7) per partition; 0 means no chime for that partition.
     String payload = parts.size() > 1 ? cleanPayload(parts[1]) : ""
-    String type = payload ? payload.substring(0, 1) : "0"
     logDebug("Chime frame received: ${payload}")
 
-    if (type != "0") {
-        sendEvent(name: "lastChime", value: "type ${type}", isStateChange: true)
+    for (int idx = 0; idx < 8 && idx < payload.length(); idx++) {
+        String type = payload.substring(idx, idx + 1)
+        if (!(type ==~ /[1-7]/)) continue
+
+        Integer partition = idx + 1
+        String value = "type ${type}"
+        if (partition == 1) sendEvent(name: "lastChime", value: value, isStateChange: true)
+        parent?.notifyPartitionEvents(partition, [[name: "lastChime", value: value, isStateChange: true]])
     }
 }
 
@@ -973,6 +1262,17 @@ private void updateZoneChild(child, Integer zoneNum, boolean active, String digi
     try {
         child.sendEvent(name: "zoneStateDigit", value: digit, isStateChange: true)
     } catch (ignored) {
+    }
+
+    if (active) {
+        try {
+            child.sendEvent(
+                name: "lastFault",
+                value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone),
+                isStateChange: true
+            )
+        } catch (ignored) {
+        }
     }
 
     if (hasCapabilitySafe(child, "ContactSensor")) {

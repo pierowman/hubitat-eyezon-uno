@@ -15,6 +15,10 @@ preferences {
 
 def mainPage() {
     dynamicPage(name: "mainPage", install: true, uninstall: true) {
+        section("Status") {
+            paragraph statusSummary()
+        }
+
         section("UNO Connection") {
             input "ip", "text", title: "UNO IP Address", required: true
             input "port", "number", title: "UNO Port", defaultValue: 4025, required: true
@@ -23,11 +27,19 @@ def mainPage() {
             input "masterCode", "text", title: "Master Code (optional, for disarm)", required: false
         }
 
-        section("Alarm Device") {
+        section("Partitions") {
+            input "partitionSet", "text",
+                title: "Partitions to create (e.g. 1 or 1-2 or 1,3)",
+                description: "The UNO supports partitions 1-8. Leave blank for partition 1 only.",
+                required: false
+            paragraph rangePreview(settings.partitionSet, 1, 8, "partition", "partition 1 only")
             input "partitionLabel", "text",
-                title: "Alarm device name",
-                description: "Friendly name for the partition/alarm device",
-                defaultValue: "House Alarm",
+                title: "Partition 1 device name",
+                description: "Friendly name for partition 1. Leave blank to use the name configured on the UNO.",
+                required: false
+            input "partitionHints", "textarea",
+                title: "Partition names (optional)",
+                description: "One per line as partitionNumber:Name, e.g. 2:Guest House",
                 required: false
         }
 
@@ -40,7 +52,12 @@ def mainPage() {
 
         section("Zone Discovery") {
             input "zoneCount", "number", title: "Configured Zone Count", defaultValue: 27, required: true
-            input "autoCreateConfiguredZones", "bool", title: "Pre-create zones 1..Zone Count at install", defaultValue: true
+            input "zoneSet", "text",
+                title: "Zone set (optional, e.g. 1-8,12,20-27)",
+                description: "Only these zones are created and tracked. Overrides Zone Count when filled in.",
+                required: false
+            paragraph rangePreview(settings.zoneSet, 1, 128, "zone", "zones 1-${safeInt(settings.zoneCount, 27)} (from Zone Count)")
+            input "autoCreateConfiguredZones", "bool", title: "Pre-create the configured zones at install", defaultValue: true
             input "defaultUnknownZoneType", "enum",
                 title: "Default type for unknown zones",
                 options: [
@@ -69,6 +86,13 @@ Examples:
 26:Master Hall PIR:motion
 27:Office Door:contact"""
             input "zoneHints", "textarea", title: "Zone Hints", required: false
+        }
+
+        section("Panic Alarms (use with care)") {
+            input "enablePanic", "bool",
+                title: "Allow panic commands (fire / medical / police)",
+                defaultValue: false
+            paragraph "Off by default. If your UNO is professionally monitored, a panic command contacts emergency services. When off, panic commands are ignored."
         }
 
         section("Logging / Health") {
@@ -100,8 +124,9 @@ def initialize() {
     logInfo("Initializing UNO integration")
 
     state.zoneHintsMap = parseZoneHints(settings.zoneHints)
+    state.partitionHintsMap = parsePartitionHints(settings.partitionHints)
     state.restZoneLabels = state.restZoneLabels ?: [:]
-    state.restPartitionLabel = state.restPartitionLabel ?: null
+    state.restPartitionLabels = state.restPartitionLabels ?: [:]
     state.restSystemName = state.restSystemName ?: null
 
     ensureConnectionDevice()
@@ -110,15 +135,16 @@ def initialize() {
         try {
             loadRestMetadata()
         } catch (e) {
-            log.warn "REST metadata load failed: ${e}"
+            noteRestFailure(e)
         }
+    } else {
+        state.restStatus = "disabled"
     }
 
-    ensurePartitionDevice()
+    ensurePartitionDevices()
 
     if (settings.autoCreateConfiguredZones != false) {
-        Integer maxZones = safeInt(settings.zoneCount, 27)
-        (1..maxZones).each { Integer zoneNum ->
+        configuredZones().each { Integer zoneNum ->
             upsertDiscoveredZone(zoneNum, null, null)
         }
     }
@@ -154,9 +180,15 @@ private void ensureConnectionDevice() {
     }
 }
 
-private void ensurePartitionDevice() {
-    String dni = "uno-partition-1"
-    String label = settings.partitionLabel ?: state.restPartitionLabel ?: "House Alarm"
+private void ensurePartitionDevices() {
+    configuredPartitions().each { Integer partition ->
+        ensurePartitionDevice(partition)
+    }
+}
+
+private void ensurePartitionDevice(Integer partition) {
+    String dni = "uno-partition-${partition}"
+    String label = partitionLabelFor(partition)
 
     def dev = getChildDevice(dni)
 
@@ -176,12 +208,24 @@ private void ensurePartitionDevice() {
         try {
             if (dev.label != label) {
                 dev.setLabel(label)
-                logInfo("Updated partition label to ${label}")
+                logInfo("Updated partition ${partition} label to ${label}")
             }
         } catch (e) {
             log.warn "Unable to update partition label: ${e}"
         }
     }
+}
+
+// Priority: partition hint > partition 1 device name > name configured on the UNO > default.
+private String partitionLabelFor(Integer partition) {
+    Map hints = (state.partitionHintsMap instanceof Map) ? state.partitionHintsMap : [:]
+    Map restLabels = (state.restPartitionLabels instanceof Map) ? state.restPartitionLabels : [:]
+
+    String label = hints["${partition}"]?.toString()?.trim()
+    if (!label && partition == 1) label = settings.partitionLabel?.toString()?.trim()
+    if (!label) label = restLabels["${partition}"]?.toString()?.trim()
+    if (!label) label = (partition == 1) ? "House Alarm" : "Partition ${partition}"
+    return label
 }
 
 private void applyConnectionSettings() {
@@ -194,6 +238,8 @@ private void applyConnectionSettings() {
     conn.updateSetting("restUsername", [value: settings.restUsername ?: "user", type: "text"])
     conn.updateSetting("masterCode", [value: settings.masterCode ?: "", type: "text"])
     conn.updateSetting("zoneCount", [value: "${safeInt(settings.zoneCount, 27)}", type: "number"])
+    conn.updateSetting("zoneSet", [value: settings.zoneSet ?: "", type: "text"])
+    conn.updateSetting("enablePanic", [value: settings.enablePanic == true, type: "bool"])
     conn.updateSetting("useRestMetadata", [value: settings.useRestMetadata == true, type: "bool"])
     conn.updateSetting("debugLogging", [value: settings.debugLogging == true, type: "bool"])
     conn.updateSetting("traceLogging", [value: settings.traceLogging == true, type: "bool"])
@@ -205,35 +251,60 @@ def refreshAll() {
     getChildDevice("uno-connection")?.refreshAll()
 }
 
-def armStay() {
-    getChildDevice("uno-connection")?.armStay()
+def armStay(def partition = 1) {
+    getChildDevice("uno-connection")?.armStay(partition)
 }
 
-def armAway() {
-    getChildDevice("uno-connection")?.armAway()
+def armAway(def partition = 1) {
+    getChildDevice("uno-connection")?.armAway(partition)
 }
 
-def chimeOn() {
-    getChildDevice("uno-connection")?.chimeOn()
+def chimeOn(def partition = 1) {
+    getChildDevice("uno-connection")?.chimeOn(partition)
 }
 
-def chimeOff() {
-    getChildDevice("uno-connection")?.chimeOff()
+def chimeOff(def partition = 1) {
+    getChildDevice("uno-connection")?.chimeOff(partition)
 }
 
-def disarm(String code = null) {
-    if (code) {
-        getChildDevice("uno-connection")?.disarm(code)
-    } else {
-        getChildDevice("uno-connection")?.disarm()
-    }
+def disarm(String code = null, def partition = 1) {
+    getChildDevice("uno-connection")?.disarm(code, partition)
 }
 
-def notifyPartitionState(String status) {
-    def partition = getChildDevice("uno-partition-1")
-    if (partition) {
-        partition.setAlarmState(status)
-    }
+def bypassZone(def zone) {
+    getChildDevice("uno-connection")?.bypassZone(zone)
+}
+
+def unbypassZone(def zone) {
+    getChildDevice("uno-connection")?.unbypassZone(zone)
+}
+
+def bypassOpenZones(def partition = 1) {
+    getChildDevice("uno-connection")?.bypassOpenZones(partition)
+}
+
+def unbypassAllZones(def partition = 1) {
+    getChildDevice("uno-connection")?.unbypassAllZones(partition)
+}
+
+def sendKeys(String keys, def partition = 1) {
+    getChildDevice("uno-connection")?.sendKeys(keys, partition)
+}
+
+def panic(String type, def partition = 1) {
+    getChildDevice("uno-connection")?.panic(type, partition)
+}
+
+// Partitions without a device (not in the partition set) are ignored.
+def notifyPartitionState(Integer partition, String status) {
+    getChildDevice("uno-partition-${partition}")?.setAlarmState(status)
+}
+
+// Forwards attribute events (trouble flags, chime) from the connection device to a partition device.
+def notifyPartitionEvents(Integer partition, List events) {
+    def dev = getChildDevice("uno-partition-${partition}")
+    if (!dev) return
+    events?.each { Map e -> dev.sendEvent(e) }
 }
 
 def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String suggestedName = null) {
@@ -360,8 +431,8 @@ private void loadRestMetadata() {
     List zoneLabels = meta["zone labels"] instanceof List ? meta["zone labels"] : []
     Map<String, String> mapped = [:]
 
-    zoneLabels.eachWithIndex { String label, int idx ->
-        String cleaned = (label ?: "").trim()
+    zoneLabels.eachWithIndex { def label, int idx ->
+        String cleaned = (label ?: "").toString().trim()
         if (cleaned) {
             mapped["${idx + 1}"] = cleaned
         }
@@ -370,17 +441,39 @@ private void loadRestMetadata() {
     state.restZoneLabels = mapped
 
     List partitionLabels = meta["partition labels"] instanceof List ? meta["partition labels"] : []
-    String p1 = partitionLabels ? (partitionLabels[0] ?: "").trim() : null
-    if (p1) {
-        state.restPartitionLabel = p1
+    Map<String, String> partitionMapped = [:]
+    partitionLabels.eachWithIndex { def label, int idx ->
+        String cleaned = (label ?: "").toString().trim()
+        if (cleaned && idx < 8) {
+            partitionMapped["${idx + 1}"] = cleaned
+        }
     }
+    state.restPartitionLabels = partitionMapped
 
     String sys = (meta["system name"] ?: "").toString().trim()
     if (sys) {
         state.restSystemName = sys
     }
 
-    logInfo("Loaded REST metadata: ${mapped.size()} zone labels" + (state.restPartitionLabel ? ", partition=${state.restPartitionLabel}" : ""))
+    state.restStatus = "ok"
+    logInfo("Loaded REST metadata: ${mapped.size()} zone labels, ${partitionMapped.size()} partition labels")
+}
+
+// A 401 means the REST credentials are wrong, which is worth calling out separately from "unreachable".
+private void noteRestFailure(Exception e) {
+    Integer status = null
+    try {
+        status = (e.hasProperty("statusCode") ? e.statusCode : e.response?.status) as Integer
+    } catch (ignored) {
+    }
+
+    if (status == 401) {
+        state.restStatus = "credentials rejected (HTTP 401)"
+        log.error "UNO rejected the REST credentials (HTTP 401). Check the REST username and the local password."
+    } else {
+        state.restStatus = "unreachable"
+        log.warn "REST metadata load failed: ${e}"
+    }
 }
 
 private Map restGetJson(String path) {
@@ -494,6 +587,102 @@ private Map parseZoneHints(String raw) {
     }
 
     return result
+}
+
+// Same "number:name" format as zone hints, but only the name is used.
+private Map parsePartitionHints(String raw) {
+    Map result = [:]
+    if (!raw) return result
+
+    raw.split("\\n").each { String line ->
+        String cleaned = line?.trim()
+        if (!cleaned || cleaned.startsWith("#")) return
+
+        int idx = cleaned.indexOf(":")
+        if (idx < 1) return
+
+        String number = cleaned.substring(0, idx).trim()
+        String name = cleaned.substring(idx + 1).trim()
+        if (number.isInteger() && name) {
+            result[number] = name
+        }
+    }
+
+    return result
+}
+
+// Parses "1-3,7,10-12" into sorted unique numbers within min..max; anything else is reported in invalid.
+private Map parseRange(def spec, Integer min, Integer max) {
+    Set<Integer> values = new TreeSet<Integer>()
+    List<String> invalid = []
+
+    String text = (spec ?: "").toString().replaceAll("\\s", "")
+    if (!text) return [values: [], invalid: invalid]
+
+    text.split(",").each { String token ->
+        if (!token) return
+        def m = (token =~ /^(\d+)(?:-(\d+))?$/)
+        if (!m.matches()) {
+            invalid << token
+            return
+        }
+        int lo = Integer.parseInt(m.group(1))
+        int hi = m.group(2) != null ? Integer.parseInt(m.group(2)) : lo
+        if (lo > hi || lo < min || hi > max) {
+            invalid << token
+            return
+        }
+        (lo..hi).each { values << it }
+    }
+
+    return [values: values as List<Integer>, invalid: invalid]
+}
+
+// Zones to create and track: the zone set if configured, otherwise 1..zone count.
+private List<Integer> configuredZones() {
+    Map parsed = parseRange(settings.zoneSet, 1, 128)
+    if (parsed.values) return parsed.values
+
+    Integer count = Math.min(Math.max(safeInt(settings.zoneCount, 27), 1), 128)
+    return (1..count).collect { it as Integer }
+}
+
+private List<Integer> configuredPartitions() {
+    Map parsed = parseRange(settings.partitionSet, 1, 8)
+    return parsed.values ?: [1]
+}
+
+private String rangePreview(def spec, Integer min, Integer max, String noun, String fallback) {
+    Map parsed = parseRange(spec, min, max)
+    List<String> lines = []
+    if (parsed.values) {
+        lines << "Will use ${noun}s: ${parsed.values.join(', ')} (${parsed.values.size()})"
+    } else {
+        lines << "Will use ${fallback}"
+    }
+    if (parsed.invalid) {
+        lines << "Ignored (not valid ${noun} numbers ${min}-${max}): ${parsed.invalid.join(', ')}"
+    }
+    return lines.join("\n")
+}
+
+private String statusSummary() {
+    def conn = getChildDevice("uno-connection")
+    if (!conn) return "The UNO Connection device is created when you press Done."
+
+    List<String> lines = []
+    lines << "Connection: ${conn.currentValue('connectionState') ?: 'unknown'}"
+
+    String model = conn.currentValue("panelModel")
+    String fw = conn.currentValue("firmwareVersion")
+    String mac = conn.currentValue("panelMac")
+    if (model || fw || mac) {
+        lines << "Panel: ${[model, fw ? 'firmware ' + fw : null, mac ? 'MAC ' + mac : null].findAll { it }.join(', ')}"
+    }
+
+    lines << "REST: ${state.restStatus ?: 'not checked yet'}"
+    if (settings.enablePanic == true) lines << "Panic commands are ENABLED"
+    return lines.join("\n")
 }
 
 private Integer safeInt(def val, Integer fallback) {

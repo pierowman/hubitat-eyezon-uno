@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: wtfjoke/setup-groovy@v3
+        with:
+          groovy-version: "4.0"
+      - name: Run tests
+        run: groovy tests/run.groovy
