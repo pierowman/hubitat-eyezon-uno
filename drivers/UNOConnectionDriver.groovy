@@ -666,6 +666,10 @@ private void handleZoneBitmap(List<String> parts) {
     if (parts.size() < 2) return
 
     String bitmapHex = cleanPayload(parts[1]).toUpperCase()
+    if (!(bitmapHex ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed zone bitmap: ${bitmapHex.take(64)}")
+        return
+    }
     sendEvent(name: "zoneBitmapLength", value: bitmapHex.length())
 
     String previous = state.lastZoneBitmap

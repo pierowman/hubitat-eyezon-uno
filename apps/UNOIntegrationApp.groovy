@@ -459,11 +459,12 @@ private String canonicalType(String raw) {
 private String inferTypeFromName(String name) {
     String n = (name ?: "").toLowerCase()
 
-    if (n.contains("pir") || n.contains("motion")) return "motion"
-    if (n.contains("smoke") || n.contains("heat")) return "smoke"
-    if (n.contains("carbon monoxide") || n == "co" || n.contains(" co")) return "co"
-    if (n.contains("water") || n.contains("leak") || n.contains("flood") || n.contains("hvac")) return "water"
-    if (n.contains("door") || n.contains("window") || n.contains("gate") || n.contains("patio")) return "contact"
+    // Match at word starts so "Courtyard" isn't CO and "Wheat" isn't heat.
+    if (n =~ /\b(pir|motion)/) return "motion"
+    if (n =~ /\b(smoke|heat)/) return "smoke"
+    if (n.contains("carbon monoxide") || n =~ /\bco\b/) return "co"
+    if (n =~ /\b(water|leak|flood|hvac)/) return "water"
+    if (n =~ /\b(door|window|gate|patio)/) return "contact"
 
     return null
 }
