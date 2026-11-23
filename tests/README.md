@@ -41,6 +41,7 @@ The exit code is non-zero if anything fails.
 | `cases/70_spec_conformance.groovy` | The TPI spec's own examples, the exact bytes of every command, response codes and partition states |
 | `cases/75_robustness.groovy` | Empty, malformed and missing settings and state never crash setup or frame handling (regression guard for an envisalink_new bug where an empty partition spec made a fallback call `.append()` on `None`) |
 | `cases/76_truncated_data.groovy` | Truncated and garbled frames lose only themselves, the receive buffer is bounded, nothing disconnects, bypass flags always clear, unlisted partition states are busy |
+| `cases/77_state_stability.groovy` | Arming, entry delay and alarm states don't flap while a standing trouble and other frames keep arriving (regression guard for envisalink_new #255) |
 
 ## Writing a test
 
