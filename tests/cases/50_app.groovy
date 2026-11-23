@@ -121,12 +121,15 @@ k.section("Forwarding to the connection and partitions") {
     a.bypassZone(7); a.unbypassZone(7); a.bypassOpenZones(2); a.unbypassAllZones(); a.sendKeys("*71", 2); a.panic("fire", 2)
     List calls = env.children["uno-connection"].callArgs
     List expected = [
-        ["chimeOn", [1]], ["chimeOff", [2]], ["armStay", [1]], ["armAway", [2]], ["refreshAll", []],
+        ["chimeOn", [1]], ["chimeOff", [2]], ["armStay", [1, null]], ["armAway", [2, null]], ["refreshAll", []],
         ["disarm", [null, 1]], ["disarm", ["1234", 2]],
         ["bypassZone", [7]], ["unbypassZone", [7]], ["bypassOpenZones", [2]], ["unbypassAllZones", [1]],
         ["sendKeys", ["*71", 2]], ["panic", ["fire", 2]]
     ]
     k.check("every command reaches the connection device with its partition", calls == expected, calls)
+
+    a.armStay(2, "4321"); a.armAway(1, "4321")
+    k.check("an arm code is passed through", env.children["uno-connection"].callArgs.takeRight(2) == [["armStay", [2, "4321"]], ["armAway", [1, "4321"]]], env.children["uno-connection"].callArgs)
 
     a.notifyPartitionState(2, "armedStay")
     k.check("partition state goes to the right partition device", env.children["uno-partition-2"].alarmStates == ["armedStay"] && env.children["uno-partition-1"].alarmStates == [])
@@ -147,6 +150,22 @@ k.section("Panic setting") {
     a.updated()
     k.check("turning it on is pushed to the connection device", env.children["uno-connection"].settingsUpdated.any { it[0] == "enablePanic" && it[1].value == true })
     k.check("the status summary warns while panic is enabled", a.statusSummary().contains("Panic commands are ENABLED"))
+}
+
+k.section("Require code to arm setting") {
+    def (a, env) = k.newApp([zoneCount: 1])
+    a.initialize()
+    k.check("off by default and pushed to the connection device", env.children["uno-connection"].settingsUpdated.any { it[0] == "requireCodeToArm" && it[1].value == false })
+    k.check("the summary says nothing while it is off", !a.statusSummary().contains("code"))
+
+    a.settings.requireCodeToArm = true
+    a.settings.masterCode = "4321"
+    a.updated()
+    k.check("turning it on is pushed to the connection device", env.children["uno-connection"].settingsUpdated.any { it[0] == "requireCodeToArm" && it[1].value == true })
+    k.check("the summary says arming needs the master code", a.statusSummary().contains("Arming requires the master code"), a.statusSummary())
+
+    a.settings.masterCode = ""
+    k.check("the summary warns when there is no master code to check against", a.statusSummary().contains("WARNING: arming requires a code but no master code is set"), a.statusSummary())
 }
 
 k.section("REST status and setup checks") {

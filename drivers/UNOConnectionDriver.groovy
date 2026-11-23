@@ -60,6 +60,7 @@ metadata {
         input name: "zoneCount", type: "number", title: "Configured Zone Count", defaultValue: 27, required: true
         input name: "zoneSet", type: "text", title: "Zone set (optional, e.g. 1-8,12,20-27; overrides zone count)", required: false
         input name: "enablePanic", type: "bool", title: "Allow panic commands (contacts emergency services if the UNO is monitored)", defaultValue: false
+        input name: "requireCodeToArm", type: "bool", title: "Require the master code to arm (checked locally; the UNO's arm commands take no code)", defaultValue: false
         input name: "useRestMetadata", type: "bool", title: "Enable REST metadata/startup sync", defaultValue: true
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
         input name: "traceLogging", type: "bool", title: "Enable trace logging", defaultValue: false
@@ -80,9 +81,14 @@ def updated() {
 }
 
 def initialize() {
+    // Anything still queued belongs to the previous session and must not run in this one.
+    failOutstanding("reinitializing")
+
     state.rxBuffer = ""
     state.commandQueue = []
     state.commandInFlight = null
+    state.reconnectDelay = 2
+    state.reconnectDueAt = 0L
     state.lastZoneBitmap = null
     state.lastPartitionBitmap = null
     state.partitionStatus = [:]
@@ -127,6 +133,7 @@ private void scheduleHealthChecks() {
 
 def reconnect() {
     unschedule("reconnect")
+    state.reconnectDueAt = 0L
 
     try {
         interfaces.rawSocket.close()
@@ -135,7 +142,8 @@ def reconnect() {
 
     state.loggedIn = false
     state.loginSent = false
-    state.commandInFlight = null
+    // A new session starts from a clean slate: queued commands may be stale and must not fire late.
+    failOutstanding("reconnecting")
     state.restStartupDone = false
     state.authFailed = false
     state.rxBuffer = ""
@@ -150,13 +158,25 @@ def reconnect() {
     } catch (Exception e) {
         log.error "Socket connect failed: ${e}"
         sendEvent(name: "connectionState", value: "error")
-        scheduleReconnect(30)
+        scheduleReconnect(nextReconnectDelay())
     }
 }
 
 private void scheduleReconnect(Integer seconds) {
-    logDebug("Reconnect scheduled in ${seconds}s")
+    logInfo("Reconnecting in ${seconds}s")
+    state.reconnectDueAt = now() + (seconds * 1000L)
     runIn(seconds, "reconnect")
+}
+
+// Exponential back-off: 2, 4, 8 ... up to 128 seconds. It resets once a connection has stayed up.
+private Integer nextReconnectDelay() {
+    Integer delay = safeInt(state.reconnectDelay, 2)
+    state.reconnectDelay = Math.min(delay * 2, 128)
+    return delay
+}
+
+private boolean reconnectPending() {
+    return ((state.reconnectDueAt ?: 0L) as Long) > now()
 }
 
 def socketStatus(String message) {
@@ -172,9 +192,12 @@ def socketStatus(String message) {
         }
         state.loggedIn = false
         state.loginSent = false
-        state.commandInFlight = null
-        // Back off after a rejected password so retries can't lock the panel out.
-        scheduleReconnect(state.authFailed ? 300 : 5)
+        failOutstanding("connection lost")
+        // One drop can produce several callbacks; only the first schedules a reconnect (and advances the back-off).
+        // After a rejected password the longer delay is already scheduled, so retries can't lock the panel out.
+        if (!reconnectPending()) {
+            scheduleReconnect(state.authFailed ? 300 : nextReconnectDelay())
+        }
         return
     }
 
@@ -217,16 +240,38 @@ def poll() {
     enqueueCommand("00", "", "poll")
 }
 
-def armStay(def partition = 1) {
+def armStay(def partition = 1, String code = null) {
     Integer p = normalizePartition(partition)
     if (p == null) return
+    if (!armCodeAccepted("armStay", code)) return
     enqueueCommand("08", "${p}", "armStay")
 }
 
-def armAway(def partition = 1) {
+def armAway(def partition = 1, String code = null) {
     Integer p = normalizePartition(partition)
     if (p == null) return
+    if (!armCodeAccepted("armAway", code)) return
     enqueueCommand("09", "${p}", "armAway")
+}
+
+// "Require code to arm" is a local gate: the UNO's arm commands (08/09) take no code, so the code is
+// compared with the configured master code here. Disarming always needs a code and is checked by the UNO.
+private boolean armCodeAccepted(String name, String code) {
+    if (settings.requireCodeToArm != true) return true
+
+    String master = settings.masterCode?.toString()?.trim()
+    String supplied = code?.toString()?.trim()
+
+    if (!master) {
+        log.warn "${name} rejected: 'Require code to arm' is on but no master code is configured"
+    } else if (!supplied || supplied != master) {
+        log.warn "${name} rejected: a valid code is required to arm"
+    } else {
+        return true
+    }
+
+    sendEvent(name: "lastAck", value: "rejected:${name}:code", isStateChange: true)
+    return false
 }
 
 // TPI command 10: <partition>,<0|1>. Not available on EVL4MAX-SA / DUO-SA.
@@ -325,8 +370,7 @@ def panic(String type, def partition = 1) {
 }
 
 def clearCommandQueue() {
-    state.commandQueue = []
-    state.commandInFlight = null
+    failOutstanding("cleared by user")
     logInfo("Cleared command queue")
 }
 
@@ -348,6 +392,12 @@ def watchdogCheck() {
             reconnect()
         }
         return
+    }
+
+    // A connection that has stayed up for 2 minutes is healthy again, so the next drop starts the back-off over.
+    long authenticatedAt = (state.authenticatedAt ?: 0L) as Long
+    if (authenticatedAt > 0L && (now() - authenticatedAt) > 120000L && safeInt(state.reconnectDelay, 2) != 2) {
+        state.reconnectDelay = 2
     }
 
     long lastTs = (state.lastFrameTs ?: 0L) as Long
@@ -479,10 +529,59 @@ private void enqueueCommand(String cc, String data, String name, Map opts = [:])
     }
 
     logDebug("Queued ${name}")
+    // Backstop so a command stuck behind a dead connection still expires without any other activity.
+    runIn(queueMaxAgeSeconds() + 5, "expireQueue")
     processQueue()
 }
 
+// A command that hasn't been sent within this time is dropped rather than run late.
+private Integer queueMaxAgeSeconds() {
+    return 30
+}
+
+def expireQueue() {
+    expireStaleCommands()
+}
+
+private void expireStaleCommands() {
+    if (!(state.commandQueue instanceof List) || state.commandQueue.isEmpty()) return
+
+    long cutoff = now() - (queueMaxAgeSeconds() * 1000L)
+    List stale = state.commandQueue.findAll { ((it.ts ?: 0L) as Long) < cutoff }
+    if (!stale) return
+
+    state.commandQueue.removeAll(stale)
+    reportDropped(stale, "waited more than ${queueMaxAgeSeconds()}s to be sent")
+}
+
+// Drops the in-flight command and everything queued behind it, and says so.
+private void failOutstanding(String reason) {
+    List dropped = []
+    if (state.commandInFlight) dropped << state.commandInFlight
+    if (state.commandQueue instanceof List) dropped.addAll(state.commandQueue)
+
+    state.commandInFlight = null
+    state.commandQueue = []
+    unschedule("commandTimeoutCheck")
+    unschedule("retryInFlight")
+
+    if (dropped) reportDropped(dropped, reason)
+}
+
+private void reportDropped(List dropped, String reason) {
+    dropped.each { def c ->
+        String name = (c.name ?: "command").toString()
+        sendEvent(name: "lastAck", value: "dropped:${name}", isStateChange: true)
+        if (name.startsWith("panic")) {
+            log.error "PANIC command '${name}' was NOT sent (${reason})"
+        }
+    }
+    logWarn("Dropped ${dropped.size()} command(s) (${reason}): ${dropped*.name.join(', ')}")
+}
+
 private void processQueue() {
+    expireStaleCommands()
+
     if (!state.loggedIn) {
         logDebug("Queue paused until login completes")
         return
@@ -506,19 +605,40 @@ private void processQueue() {
         noRetry  : next.noRetry,
         partition: next.partition,
         sentAt   : now(),
-        retries  : 0
+        retries  : 0,
+        overruns : 0,
+        waiting  : false
     ]
 
-    String cmd = tpiCommand(next.cc as String, next.data as String)
-    String logCmd = tpiCommand(next.cc as String, (next.log ?: next.data) as String)
     logInfo("Sending ${next.name}")
+    sendInFlight()
+}
+
+// Sends (or re-sends) the in-flight command and starts its reply timer.
+private void sendInFlight() {
+    def inflight = state.commandInFlight
+    if (!inflight) return
+
+    String cmd = tpiCommand(inflight.cc as String, inflight.data as String)
+    String logCmd = tpiCommand(inflight.cc as String, (inflight.log ?: inflight.data) as String)
     rawSend(cmd + "\r\n", logCmd + "\r\n")
     runIn(4, "commandTimeoutCheck")
 }
 
+// Re-sends a command the panel rejected as busy (response code 1), after a back-off delay.
+def retryInFlight() {
+    def inflight = state.commandInFlight
+    if (!inflight || !inflight.waiting) return
+
+    inflight.waiting = false
+    inflight.sentAt = now()
+    state.commandInFlight = inflight
+    sendInFlight()
+}
+
 def commandTimeoutCheck() {
     def inflight = state.commandInFlight
-    if (!inflight) return
+    if (!inflight || inflight.waiting) return
 
     long ageMs = now() - (inflight.sentAt as Long)
     if (ageMs < 3500L) return
@@ -528,16 +648,16 @@ def commandTimeoutCheck() {
         inflight.sentAt = now()
         state.commandInFlight = inflight
 
-        String retryCmd = tpiCommand(inflight.cc as String, inflight.data as String)
-        String retryLog = tpiCommand(inflight.cc as String, (inflight.log ?: inflight.data) as String)
         logWarn("Retrying ${inflight.name}")
-        rawSend(retryCmd + "\r\n", retryLog + "\r\n")
-        runIn(4, "commandTimeoutCheck")
+        sendInFlight()
     } else {
         logWarn("Command timeout: ${inflight.name}" + (inflight.noRetry ? " (not retried)" : ""))
         sendEvent(name: "lastAck", value: "timeout:${inflight.name}")
         state.commandInFlight = null
-        processQueue()
+        // Silence after a command (and its retry) means the link is dead; reconnecting also drops the
+        // commands queued behind it, which would otherwise run late.
+        logWarn("No reply from the UNO; reconnecting")
+        reconnect()
     }
 }
 
@@ -630,6 +750,7 @@ private void parseFrame(String frame) {
         state.loggedIn = true
         state.loginSent = false
         state.authFailed = false
+        state.authenticatedAt = now()
         logInfo("UNO login successful")
         sendEvent(name: "connectionState", value: "authenticated")
 
@@ -661,7 +782,7 @@ private void parseFrame(String frame) {
         state.loginSent = false
         logWarn("UNO login timed out")
         sendEvent(name: "connectionState", value: "loginTimedOut")
-        scheduleReconnect(30)
+        scheduleReconnect(nextReconnectDelay())
         return
     }
 
@@ -846,6 +967,20 @@ private void parseAckFrame(String frame) {
     def inflight = state.commandInFlight
     // The ack echoes the command it answers; ignore acks for anything other than the in-flight command.
     if (!inflight || !cc.equalsIgnoreCase(inflight.cc as String)) {
+        return
+    }
+
+    // Response code 1 means the panel was still busy and did not run the command (spec 3.7), so it is safe to
+    // send it again after a growing delay: 1s, 2s, 4s.
+    if (code == 1 && safeInt(inflight.overruns, 0) < 3) {
+        Integer attempt = safeInt(inflight.overruns, 0) + 1
+        Integer delay = 1 << (attempt - 1)
+        inflight.overruns = attempt
+        inflight.waiting = true
+        state.commandInFlight = inflight
+        unschedule("commandTimeoutCheck")
+        logWarn("${inflight.name}: the UNO was busy (receive buffer overrun); retry ${attempt} of 3 in ${delay}s")
+        runIn(delay, "retryInFlight")
         return
     }
 

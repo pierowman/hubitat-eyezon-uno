@@ -88,7 +88,11 @@ Examples:
             input "zoneHints", "textarea", title: "Zone Hints", required: false
         }
 
-        section("Panic Alarms (use with care)") {
+        section("Safety") {
+            input "requireCodeToArm", "bool",
+                title: "Require the master code to arm",
+                defaultValue: false
+            paragraph "Off by default. When on, Arm Stay / Arm Away only work if a code is passed (for example the *WithCode commands) and it matches the master code above. The UNO's arm commands take no code, so this is checked here, not by the UNO. It also blocks arming from HSM or a dashboard keypad, which don't send a code."
             input "enablePanic", "bool",
                 title: "Allow panic commands (fire / medical / police)",
                 defaultValue: false
@@ -240,6 +244,7 @@ private void applyConnectionSettings() {
     conn.updateSetting("zoneCount", [value: "${safeInt(settings.zoneCount, 27)}", type: "number"])
     conn.updateSetting("zoneSet", [value: settings.zoneSet ?: "", type: "text"])
     conn.updateSetting("enablePanic", [value: settings.enablePanic == true, type: "bool"])
+    conn.updateSetting("requireCodeToArm", [value: settings.requireCodeToArm == true, type: "bool"])
     conn.updateSetting("useRestMetadata", [value: settings.useRestMetadata == true, type: "bool"])
     conn.updateSetting("debugLogging", [value: settings.debugLogging == true, type: "bool"])
     conn.updateSetting("traceLogging", [value: settings.traceLogging == true, type: "bool"])
@@ -251,12 +256,12 @@ def refreshAll() {
     getChildDevice("uno-connection")?.refreshAll()
 }
 
-def armStay(def partition = 1) {
-    getChildDevice("uno-connection")?.armStay(partition)
+def armStay(def partition = 1, String code = null) {
+    getChildDevice("uno-connection")?.armStay(partition, code)
 }
 
-def armAway(def partition = 1) {
-    getChildDevice("uno-connection")?.armAway(partition)
+def armAway(def partition = 1, String code = null) {
+    getChildDevice("uno-connection")?.armAway(partition, code)
 }
 
 def chimeOn(def partition = 1) {
@@ -681,6 +686,9 @@ private String statusSummary() {
     }
 
     lines << "REST: ${state.restStatus ?: 'not checked yet'}"
+    if (settings.requireCodeToArm == true) {
+        lines << (settings.masterCode ? "Arming requires the master code" : "WARNING: arming requires a code but no master code is set, so arming is blocked")
+    }
     if (settings.enablePanic == true) lines << "Panic commands are ENABLED"
     return lines.join("\n")
 }

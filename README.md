@@ -15,6 +15,8 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 **Alarm control**
 - One partition device per configured partition (1-8), each with its own state, trouble flags and commands
 - Arm Stay, Arm Away and Disarm per partition
+- Optional **Require the master code to arm**, checked locally (off by default)
+- Hubitat `SecurityKeypad` capability on each partition device: a keypad tile on dashboards, and usable as an HSM keypad
 - Door chime on/off per partition
 - Keypress command (`sendKeys`) to send a key sequence to a partition
 - Optional panic commands (fire / medical / police), **off by default**
@@ -32,7 +34,9 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Panel trouble decoding per partition (AC failure, low battery, server offline, zone trouble, siren fault and more)
 - Panel model, firmware, MAC address and time
 - Status section on the app page: connection state, panel details, and whether the REST credentials were accepted
-- Heartbeat polling and watchdog reconnect with back-off (see [Connection behaviour](#connection-behaviour))
+- Heartbeat polling and watchdog reconnect with exponential back-off (see [Connection behaviour](#connection-behaviour))
+- A command never runs late: anything still queued when the connection drops or reconnects is dropped and logged
+- A busy panel (TPI response code 1) is retried with back-off
 - Passwords and codes are masked in trace logs
 
 **Setup help**
@@ -59,7 +63,8 @@ Device network IDs are fixed, so existing rules and dashboards keep working acro
 |---|---|
 | UNO IP, Port, Local/TPI Password | Connection details. The password is the one you use for the UNO's local web page |
 | REST Username | Defaults to `user` |
-| Master Code | Optional. Used by `disarm` when no code is passed (4-6 digits) |
+| Master Code | Optional. Used by `disarm` when no code is passed (4-6 digits), and to check the code when **Require the master code to arm** is on |
+| Require the master code to arm | Off by default. See [Requiring a code to arm](#requiring-a-code-to-arm) |
 | Partitions to create | e.g. `1`, `1-2` or `1,3`. Blank means partition 1 only |
 | Partition 1 device name / Partition names | Names for the partition devices. Blank uses the names configured on the UNO |
 | Enable REST metadata and startup sync | Uses the UNO REST interface for labels and startup state |
@@ -79,7 +84,9 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 
 | Where | Command | Notes |
 |---|---|---|
-| Partition | `armStay`, `armAway` | |
+| Partition | `armStay`, `armAway` | Fail if **Require the master code to arm** is on, because they carry no code |
+| Partition | `armStayWithCode(code)`, `armAwayWithCode(code)` | Arm with a code, for when a code is required |
+| Partition | `armHome`, `armNight`, `armAway` | `SecurityKeypad` / HSM entry points. Night arms stay (the UNO has no night mode). A request for the state the partition is already in is skipped |
 | Partition | `disarm(code)` | Uses the master code if no code is given. Code must be 4-6 digits |
 | Partition | `chimeOn`, `chimeOff` | |
 | Partition | `bypassOpenZones`, `unbypassAllZones` | |
@@ -94,11 +101,26 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 
 > **Warning:** the partition device uses Hubitat's `Alarm` capability, and its `off` command **disarms** the partition. Anything that turns the "alarm" off (a rule, a dashboard tile, a voice assistant) will disarm your system. `siren`, `strobe` and `both` do nothing.
 
-Commands are sent one at a time. Each waits for the panel's acknowledgement, and a command with no reply is re-sent once.
+Commands are sent one at a time. Each waits for the panel's acknowledgement. If the panel answers that it is busy (response code 1) the command is re-sent after 1, 2 and then 4 seconds. If there is no reply at all it is re-sent once, and if there is still none the integration reconnects, because silence means the link is dead.
+
+### Requiring a code to arm
+
+Turn on **Require the master code to arm** in the app and arming only works when a code that matches the master code is passed. Use `armStayWithCode` / `armAwayWithCode` on a partition, or pass the code when calling the connection or app commands from a rule.
+
+The UNO's arm commands take no code, so this check is done here, not by the UNO. That has two consequences:
+
+- It blocks anything that arms without sending a code, including HSM and the dashboard keypad tile.
+- It needs a master code to compare against. With none configured, arming is blocked and the reason is logged.
+
+Disarming always needs a code and is checked by the UNO itself, so this setting does not affect it.
+
+### Keypad and HSM
+
+Each partition device has Hubitat's `SecurityKeypad` capability, so it can be shown as a keypad tile and chosen as a keypad in HSM. `securityKeypad` follows the partition (`disarmed`, `armed home`, `armed away`, `unknown`) and keeps its last stable value during entry and exit delays and alarms. User codes are managed on the UNO, so `setCode`, `deleteCode` and `setCodeLength` do nothing but log that. The integration does not send `armingIn` events, so changing the UNO's state does not tell HSM to arm or disarm; HSM can only drive the UNO, not the other way round.
 
 ### Panic commands
 
-Panic commands are disabled until you turn on **Allow panic commands** in the app. If your UNO is professionally monitored, a panic command contacts emergency services. A panic command is placed ahead of any queued commands, is never re-sent automatically, and is always logged as a warning.
+Panic commands are disabled until you turn on **Allow panic commands** in the app. If your UNO is professionally monitored, a panic command contacts emergency services. A panic command is placed ahead of any queued commands and is always logged as a warning. It is never re-sent because of silence (it may or may not have run); it is only re-sent if the UNO replies that it was busy and did not run it. A panic that could not be sent is logged as an error.
 
 ## Attributes
 
@@ -115,6 +137,8 @@ Panic commands are disabled until you turn on **Allow panic commands** in the ap
 | `serviceRequired`, `acFailure`, `lowBattery`, `serverOffline`, `zoneTrouble`, `batteryOvercurrent`, `sirenFault`, `supervisoryFault` | `active` / `clear` |
 | `chime`, `lastChime` | `chime` is the last accepted `chimeOn`/`chimeOff` (the UNO doesn't report chime state); `lastChime` is the type of the last chime frame |
 | `lastUserAction` | The last command issued from this device |
+| `securityKeypad` | `disarmed`, `armed home`, `armed away`, `unknown` (the `SecurityKeypad` capability) |
+| `codeLength`, `maxCodes`, `lockCodes` | Fixed `6`, `0` and `{}`: user codes are managed on the UNO |
 
 Unrecognised or transitory panel states are reported as `busy`, as the TPI document recommends.
 
@@ -122,7 +146,7 @@ Unrecognised or transitory panel states are reported as `busy`, as the TPI docum
 
 **Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `panelTime`, `restStartupSync`, `lastCidEvent`, `lastHeartbeat`, `lastSystemMessage`, `lastRawMessage`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest).
 
-`connectionState` is one of `connecting`, `connected`, `loginPrompt`, `authenticated`, `auth_failed`, `loginTimedOut`, `error` or `disconnected`. `lastAck` shows `error:<command>:<code>` when the panel rejects a command, and `timeout:<command>` when it never answers.
+`connectionState` is one of `connecting`, `connected`, `loginPrompt`, `authenticated`, `auth_failed`, `loginTimedOut`, `error` or `disconnected`. `lastAck` shows `error:<command>:<code>` when the panel rejects a command, `timeout:<command>` when it never answers, `rejected:<command>:code` when a required arming code was missing or wrong, and `dropped:<command>` when a command was discarded instead of run late.
 
 ## Automations
 
@@ -137,7 +161,9 @@ See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/examp
 - **Login:** the password is sent once, followed by a CR, when the UNO shows its `Login` prompt. It is never sent again while logged in, because outside a `^...$` packet the TPI would read digits as keypad presses.
 - **Heartbeat:** a poll every 1, 5 or 10 minutes (your setting) proves the link is alive.
 - **Watchdog:** the connection is dropped and re-opened if no frames arrive for the time you choose (3, 5 or 10 minutes, never shorter than the heartbeat plus one minute). It also reconnects if the connection has not authenticated for 2 minutes.
-- **Reconnect delays:** 5 seconds after the socket drops, 30 seconds after a failed connect or a login timeout, and 5 minutes after the UNO rejects the password (to avoid locking you out). Saving the app or pressing **reconnect** retries immediately.
+- **Reconnect delays:** exponential, 2, 4, 8 and so on up to 128 seconds, for a dropped socket, a failed connect or a login timeout. The delay starts over once a connection has stayed up for 2 minutes, or when you save the app. After the UNO rejects the password it waits 5 minutes (to avoid locking you out). Pressing **reconnect** or saving the app retries immediately.
+- **Commands and reconnects:** queued commands are discarded when the connection drops, reconnects or is re-initialised, and a command that has waited more than 30 seconds to be sent is discarded too. Each one is logged and recorded in `lastAck` as `dropped:<command>`, so an arm or disarm requested during an outage never fires minutes later. Resend it once the connection is back.
+- **No reply:** a command that gets no answer is re-sent once; if there is still none, the connection is reset.
 - **Errors:** a malformed or unexpected frame is logged and skipped; it does not stop the frames behind it.
 
 ## REST metadata and startup sync
@@ -189,7 +215,7 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 | 10 | Partition chime | Implemented (`lastChime`) |
 | FF | Zone timer dump | Not implemented |
 
-**Response codes (section 3.7):** every code is reported. A command rejected with code 1 (receive buffer overrun) is logged and dropped rather than retried; commands are sent one at a time, so this should be rare.
+**Response codes (section 3.7):** every code is reported. Code 1 (receive buffer overrun, meaning the panel was busy and did not run the command) is retried after 1, 2 and 4 seconds before it is reported as a failure. The other error codes are not retried.
 
 **Interpretation notes**
 - The trouble bitfield's BIT 1-8 are read as the low-to-high bits of each partition's byte.
@@ -210,21 +236,3 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 ```
 
 The tests load the real driver and app scripts with a mock Hubitat runtime, replay the spec's own examples and check the exact bytes of every command. See [tests/README.md](tests/README.md). They can't replace testing on a real hub.
-
-## Roadmap
-
-### v1.2
-Planned improvements:
-
-- alarm event history attributes
-- semantic CID event mapping (who armed or disarmed, and when)
-- improved dashboard support
-- UNO PGM output control, zone and partition temperatures
-
-### v1.3
-Potential future improvements:
-
-- optional event noise suppression
-- retry on TPI response code 1 (buffer overrun) with back-off
-- zone timer dump
-- extended CID event mapping

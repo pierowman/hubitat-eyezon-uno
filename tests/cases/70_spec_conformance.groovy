@@ -93,7 +93,7 @@ k.section("Login rules (2.1)") {
 }
 
 k.section("Response codes (3.7)") {
-    Map expectations = ["1": "receive buffer overrun", "2": "unknown command", "3": "syntax error",
+    Map expectations = ["2": "unknown command", "3": "syntax error",
                         "6": "cannot be completed", "7": "invalid user code", "8": "out of range"]
     expectations.each { code, text ->
         def d = k.authed()
@@ -102,6 +102,14 @@ k.section("Response codes (3.7)") {
         k.check("code ${code} is reported as '${text}'", d.warns().any { it.contains(text) } && d.lastAttr("lastAck") == "error:armStay:${code}", d.warns())
         k.check("code ${code} doesn't stall the queue", d.state.commandInFlight == null)
     }
+
+    // Code 1: the panel was busy and did not run the command, so it is retried (1s, 2s, 4s) before giving up.
+    def busy = k.authed()
+    busy.armStay()
+    3.times { k.ack(busy, "08", "1"); busy.retryInFlight() }
+    k.ack(busy, "08", "1")
+    k.check("code 1 is retried three times, then reported as 'receive buffer overrun'", busy.sent.size() == 4 && busy.warns().any { it.contains("receive buffer overrun") } && busy.lastAttr("lastAck") == "error:armStay:1", [busy.sent.size(), busy.warns()])
+    k.check("code 1 doesn't stall the queue once retries are used up", busy.state.commandInFlight == null)
 
     ["4", "5"].each { code ->
         def d = k.authed()

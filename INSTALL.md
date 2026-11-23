@@ -7,7 +7,7 @@
 5. Choose the partitions to create, e.g. `1` or `1-2`. Leave it blank for partition 1 only. Name the partitions with **Partition 1 device name** and **Partition names**, or leave them blank to use the names configured on the UNO.
 6. Set the zones to create: either the **Configured Zone Count**, or a **Zone set** such as `1-8,12,20-27` (the zone set wins when filled in).
 7. Paste your zone hints in `zoneNumber:Label:type` format.
-8. Leave **Allow panic commands** off unless you really want panic commands available.
+8. Leave **Allow panic commands** off unless you really want panic commands available. Turn on **Require the master code to arm** only if you want arming to need a code (see the README for what that blocks).
 9. Click **Done**, then reopen the app. The **Status** section shows the connection state, the panel model, firmware and MAC address, and whether the REST credentials were accepted.
 
 ## Upgrading from an earlier version

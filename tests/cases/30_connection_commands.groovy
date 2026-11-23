@@ -29,12 +29,119 @@ k.section("Retry and timeout") {
     d.nowMs += 4000
     d.commandTimeoutCheck()
     k.check("second timeout drops the command", d.state.commandInFlight == null && d.lastAttr("lastAck") == "timeout:armStay", d.lastAttr("lastAck"))
+    k.check("and reconnects, because silence means the link is dead", d.socket.connects.size() == 2 && d.lastAttr("connectionState") == "connecting", d.socket.connects)
+
+    def p = k.authed(enablePanic: true)
+    p.panic("fire")
+    p.nowMs += 4000
+    p.commandTimeoutCheck()
+    k.check("a panic with no reply also triggers a reconnect, without being re-sent", p.sent.size() == 1 && p.socket.connects.size() == 2, p.sent)
 
     def q = k.newConn(); q.initialize()
     q.armStay()
     k.check("commands are queued (not sent) before login", q.sent.isEmpty() && q.state.commandQueue.size() == 1, q.sent)
     q.parse(k.hex("Login:")); q.sent.clear(); q.parse(k.hex("OK\r\n"))
     k.check("queue drains after login", q.sent.first() == "^08,1\$\r\n" || q.sent.first() == "^0C,\$\r\n", q.sent)
+}
+
+k.section("Stale commands never run late") {
+    def d = k.authed()
+    d.armStay(); d.armAway()
+    d.reconnect()
+    k.check("a reconnect drops the in-flight and queued commands", d.state.commandInFlight == null && d.state.commandQueue.isEmpty())
+    k.check("each dropped command is recorded and logged", d.lastAttr("lastAck") == "dropped:armAway" && d.warns().any { it.contains("Dropped 2 command(s) (reconnecting): armStay, armAway") }, d.warns())
+    d.sent.clear()
+    d.parse(k.hex("Login:")); d.parse(k.hex("OK\r\n"))
+    k.check("after logging in again the only command sent is the state dump", d.sent.findAll { it.startsWith("^") } == ["^0C,\$\r\n"], d.sent)
+
+    def c = k.authed()
+    c.armAway()
+    c.socketStatus("status: closed")
+    k.check("losing the connection drops the in-flight command", c.state.commandInFlight == null && c.warns().any { it.contains("(connection lost)") }, c.warns())
+
+    def i = k.authed()
+    i.armStay(); i.armAway()
+    i.initialize()
+    k.check("saving the settings drops queued commands too", i.state.commandQueue.isEmpty() && i.warns().any { it.contains("(reinitializing)") }, i.warns())
+
+    def u = k.authed()
+    u.armStay(); u.armAway()
+    u.clearCommandQueue()
+    k.check("clearing the queue by hand is reported", u.state.commandQueue.isEmpty() && u.warns().any { it.contains("(cleared by user)") }, u.warns())
+
+    def q = k.newConn(); q.initialize()
+    q.armAway()
+    k.check("a backstop timer is scheduled when a command is queued", q.pending["expireQueue"] == 35, q.pending)
+    q.nowMs += 31000L
+    q.parse(k.hex("Login:")); q.sent.clear(); q.parse(k.hex("OK\r\n"))
+    k.check("a command that waited over 30s for the login is dropped, not sent", q.sent == ["^0C,\$\r\n"] && q.warns().any { it.contains("waited more than 30s") }, [q.sent, q.warns()])
+    k.check("and is recorded as dropped", q.lastAttr("lastAck") == "dropped:armAway")
+
+    def e = k.newConn(); e.initialize()
+    e.armStay()
+    e.nowMs += 31000L
+    e.expireQueue()
+    k.check("the backstop timer expires old commands even with no other activity", e.state.commandQueue.isEmpty() && e.lastAttr("lastAck") == "dropped:armStay")
+
+    def f = k.newConn(enablePanic: true); f.initialize()
+    f.panic("fire")
+    f.reconnect()
+    k.check("a panic that could not be sent is logged as an error", f.errors().any { it.contains("PANIC command 'panic:fire' was NOT sent") }, f.errors())
+
+    def n = k.authed()
+    n.armStay()
+    n.nowMs += 5000L
+    n.armAway()
+    k.check("a fresh command behind a slow one is not expired", n.state.commandQueue.size() == 1)
+}
+
+k.section("Busy panel: retry on response code 1 (spec 3.7)") {
+    def d = k.authed()
+    d.armStay(); d.armAway()
+    k.ack(d, "08", "1")
+    k.check("code 1 waits to retry instead of failing", d.state.commandInFlight?.waiting == true && d.pending["retryInFlight"] == 1 && d.sent.size() == 1, d.pending)
+    k.check("the queued command stays behind it", d.state.commandQueue.size() == 1)
+    d.nowMs += 10000L; d.commandTimeoutCheck()
+    k.check("a command waiting to retry isn't treated as a timeout", d.state.commandInFlight != null && d.socket.connects.size() == 1)
+
+    d.retryInFlight()
+    k.check("re-sent after 1s", d.sent == ["^08,1\$\r\n", "^08,1\$\r\n"] && d.state.commandInFlight.waiting == false, d.sent)
+    k.ack(d, "08", "1")
+    k.check("second busy reply waits 2s", d.pending["retryInFlight"] == 2, d.pending)
+    d.retryInFlight()
+    k.ack(d, "08", "1")
+    k.check("third busy reply waits 4s", d.pending["retryInFlight"] == 4, d.pending)
+    d.retryInFlight()
+    k.check("sent 4 times in total", d.sent.size() == 4)
+    k.ack(d, "08", "1")
+    k.check("after 3 retries the command fails", d.lastAttr("lastAck") == "error:armStay:1" && d.warns().any { it.contains("receive buffer overrun") })
+    k.check("the queue moves on to the next command", d.sent.last() == "^09,1\$\r\n", d.sent)
+
+    def s = k.authed()
+    s.armStay()
+    k.ack(s, "08", "1"); s.retryInFlight()
+    k.ack(s, "08", "0")
+    k.check("a retry that is accepted completes normally", s.state.commandInFlight == null && s.lastAttr("lastAck") == "08,0" && s.warns().count { it.contains("rejected") } == 0, s.warns())
+
+    s.retryInFlight()
+    k.check("a stray retry timer does nothing", s.sent.size() == 2)
+
+    def p = k.authed(enablePanic: true)
+    p.panic("fire")
+    k.ack(p, "11", "1"); p.retryInFlight()
+    k.check("a panic the UNO rejected as busy was not run, so it is re-sent", p.sent == ["^11,1,0\$\r\n", "^11,1,0\$\r\n"], p.sent)
+
+    def other = k.authed()
+    other.armStay()
+    k.ack(other, "08", "6")
+    k.check("other error codes are not retried", other.state.commandInFlight == null && other.sent.size() == 1)
+
+    def r = k.authed()
+    r.armStay()
+    k.ack(r, "08", "1")
+    r.reconnect()
+    r.retryInFlight()
+    k.check("a reconnect cancels a pending retry", r.state.commandInFlight == null && r.sent.size() == 1, r.sent)
 }
 
 k.section("Arm commands and partitions") {
@@ -95,6 +202,42 @@ k.section("Chime commands") {
     k.check("chimeOn(2) => ^10,2,1\$", d.sent == ["^10,2,1\$\r\n"], d.sent)
     k.ack(d, "10")
     k.check("partition 2 chime state goes to partition 2 only", d.parent.partitionAttr(2, "chime") == "on" && d.lastAttr("chime") == "off", d.lastAttr("chime"))
+}
+
+k.section("Require code to arm") {
+    def off = k.authed(masterCode: "4321")
+    off.armStay()
+    k.check("by default arming needs no code", off.sent == ["^08,1\$\r\n"], off.sent)
+    k.ack(off, "08")
+    off.armAway(1, "9999")
+    k.check("and an extra code is simply ignored", off.sent.last() == "^09,1\$\r\n")
+
+    def d = k.authed(requireCodeToArm: true, masterCode: "4321")
+    d.armStay()
+    d.armAway(1, "0000")
+    d.armStay(1, "")
+    k.check("arming without a code, or with a wrong one, is rejected", d.sent.isEmpty() && d.warns().count { it.contains("a valid code is required to arm") } == 3, d.warns())
+    k.check("the rejection is recorded", d.lastAttr("lastAck") == "rejected:armStay:code")
+    k.check("nothing is queued for a rejected request", d.state.commandQueue.isEmpty() && d.state.commandInFlight == null)
+
+    d.armStay(1, "4321")
+    k.check("the master code allows arming stay", d.sent == ["^08,1\$\r\n"], d.sent)
+    k.ack(d, "08")
+    d.armAway(2, " 4321 ")
+    k.check("surrounding spaces are ignored, and any partition works", d.sent.last() == "^09,2\$\r\n", d.sent)
+    k.ack(d, "09")
+
+    d.disarm("1234")
+    k.check("disarm is unaffected (the UNO checks its own code)", d.sent.last() == "^12,1,1234\$\r\n", d.sent)
+    k.ack(d, "12")
+    d.bypassZone(3); k.ack(d, "04")
+    k.check("other commands are unaffected too", d.sent.last() == "^04,003\$\r\n")
+
+    k.check("the codes never appear in the log", !d.logs*.msg.any { it.contains("4321") || it.contains("0000") }, d.warns())
+
+    def none = k.authed(requireCodeToArm: true)
+    none.armStay(1, "1234")
+    k.check("with no master code configured, arming is blocked and the reason is logged", none.sent.isEmpty() && none.warns().any { it.contains("no master code is configured") }, none.warns())
 }
 
 k.section("Zone bypass commands") {

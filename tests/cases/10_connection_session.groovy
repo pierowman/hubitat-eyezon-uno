@@ -41,25 +41,57 @@ k.section("Login failures back off") {
     k.check("watchdog doesn't hammer after auth failure", d.socket.connects.size() == 1, d.socket.connects)
 
     def t = k.newConn(); t.initialize(); t.parse(k.hex("Login:")); t.parse(k.hex("Timed Out!\r\n"))
-    k.check("Timed Out => retry in 30s", t.lastAttr("connectionState") == "loginTimedOut" && t.pending["reconnect"] == 30, t.pending)
+    k.check("Timed Out => retry in 2s (first back-off step)", t.lastAttr("connectionState") == "loginTimedOut" && t.pending["reconnect"] == 2, t.pending)
 }
 
 k.section("Reconnect and socket status") {
     def f = k.newConn(); f.socket.failConnect = true; f.initialize()
-    k.check("connect failure => error + retry 30s", f.lastAttr("connectionState") == "error" && f.pending["reconnect"] == 30, f.pending)
+    k.check("connect failure => error + first retry in 2s", f.lastAttr("connectionState") == "error" && f.pending["reconnect"] == 2, f.pending)
 
     def d = k.newConn(); d.initialize()
     d.socketStatus("status: open")
     k.check("'status: open' => connected", d.lastAttr("connectionState") == "connected")
     d.socketStatus("disconnected")
-    k.check("'disconnected' => disconnected + reconnect in 5s",
-            d.lastAttr("connectionState") == "disconnected" && d.pending["reconnect"] == 5, d.pending)
-    d.pending.clear()
+    k.check("'disconnected' => disconnected + reconnect in 2s",
+            d.lastAttr("connectionState") == "disconnected" && d.pending["reconnect"] == 2, d.pending)
+    d.pending.clear(); d.state.reconnectDueAt = 0L
     d.socketStatus("failed to connect")
-    k.check("'failed to connect' schedules reconnect (not treated as connected)", d.pending["reconnect"] == 5, d.pending)
-    d.pending.clear()
+    k.check("'failed to connect' schedules a reconnect (not treated as connected), 4s into the back-off", d.pending["reconnect"] == 4, d.pending)
+    d.pending.clear(); d.state.reconnectDueAt = 0L
     d.socketStatus("receive error: Stream closed")
-    k.check("receive error schedules reconnect", d.pending["reconnect"] == 5)
+    k.check("receive error schedules a reconnect, 8s into the back-off", d.pending["reconnect"] == 8, d.pending)
+}
+
+k.section("Exponential reconnect back-off") {
+    def d = k.newConn(); d.socket.failConnect = true
+    d.initialize()
+    List delays = [d.pending["reconnect"]]
+    8.times {
+        d.reconnect()   // the scheduled retry firing
+        delays << d.pending["reconnect"]
+    }
+    k.check("delays double from 2s up to a 128s cap", delays == [2, 4, 8, 16, 32, 64, 128, 128, 128], delays)
+    d.initialize()
+    k.check("saving the settings starts the back-off over", d.pending["reconnect"] == 2, d.pending)
+
+    def dup = k.newConn(); dup.initialize()
+    dup.socketStatus("status: closed")
+    dup.socketStatus("receive error: Stream closed")
+    k.check("several callbacks for one drop schedule one reconnect and advance the back-off once", dup.pending["reconnect"] == 2 && dup.state.reconnectDelay == 4, [dup.pending, dup.state.reconnectDelay])
+    dup.reconnect()
+    dup.socketStatus("status: closed")
+    k.check("a connection that drops again right away keeps backing off", dup.pending["reconnect"] == 4, dup.pending)
+
+    def s = k.authed()
+    s.state.reconnectDelay = 64
+    s.nowMs += 119000L; s.watchdogCheck()
+    k.check("a connection that has been up for less than 2 minutes keeps its back-off", s.state.reconnectDelay == 64, s.state.reconnectDelay)
+    s.nowMs += 2000L; s.watchdogCheck()
+    k.check("after 2 stable minutes the back-off resets", s.state.reconnectDelay == 2, s.state.reconnectDelay)
+
+    def a = k.newConn(); a.initialize(); a.state.reconnectDelay = 64
+    a.parse(k.hex("Login:")); a.parse(k.hex("FAILED\r\n"))
+    k.check("a rejected password always waits 5 minutes, whatever the back-off", a.pending["reconnect"] == 300, a.pending)
 }
 
 k.section("Watchdog") {
