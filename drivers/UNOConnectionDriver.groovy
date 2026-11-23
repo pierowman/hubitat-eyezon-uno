@@ -652,6 +652,11 @@ private Map parseRange(def spec, Integer min, Integer max) {
             invalid << token
             return
         }
+        // Anything this long is out of range anyway, and a longer number would overflow an int.
+        if (m.group(1).length() > 4 || (m.group(2) != null && m.group(2).length() > 4)) {
+            invalid << token
+            return
+        }
         int lo = Integer.parseInt(m.group(1))
         int hi = m.group(2) != null ? Integer.parseInt(m.group(2)) : lo
         if (lo > hi || lo < min || hi > max) {
@@ -1372,7 +1377,8 @@ private Map<Integer, List<Integer>> partitionZoneMap() {
         if (partition < 1 || partition > 8) return
 
         List<Integer> zones = parseRange(line.substring(colon + 1), 1, 128).values.findAll { Integer z -> valid.contains(z) && taken.add(z) }
-        result[partition] = ((result[partition] ?: []) + zones).sort()
+        // A line with no usable zones is not an assignment, or that partition would show nothing forever.
+        if (zones) result[partition] = ((result[partition] ?: []) + zones).sort()
     }
 
     if (ZONE_CACHE.size() > 16) ZONE_CACHE.clear()

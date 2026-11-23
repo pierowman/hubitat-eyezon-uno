@@ -1030,6 +1030,11 @@ private Map parseRange(def spec, Integer min, Integer max) {
             invalid << token
             return
         }
+        // Anything this long is out of range anyway, and a longer number would overflow an int.
+        if (m.group(1).length() > 4 || (m.group(2) != null && m.group(2).length() > 4)) {
+            invalid << token
+            return
+        }
         int lo = Integer.parseInt(m.group(1))
         int hi = m.group(2) != null ? Integer.parseInt(m.group(2)) : lo
         if (lo > hi || lo < min || hi > max) {
@@ -1092,6 +1097,11 @@ private Map parsePartitionZones(def spec) {
                 owner[z] = partition
                 mine << z
             }
+        }
+        if (mine.isEmpty()) {
+            // A line that ends up with no zones must not create an assignment, or that partition would show nothing forever.
+            if (!parsed.invalid) problems << "partition ${partition} has no zones".toString()
+            return
         }
         assignments[partition] = ((assignments[partition] ?: []) + mine).sort()
     }
