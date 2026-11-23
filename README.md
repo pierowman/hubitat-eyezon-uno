@@ -150,7 +150,9 @@ The UNO doesn't say which partition a zone belongs to, so by default `openZones`
 2:9-16,20
 ```
 
-Each partition device then shows only its own open and bypassed zones. The connection device and the status device still show every zone. The app checks what you enter and shows the result under the box: a zone can't be in two partitions, a zone must be one of your configured zones, and the partition must be one you create. Anything that fails those checks is ignored and reported, never guessed at. Zones you leave out appear only in the panel-wide lists, and a partition with no line shows nothing. This is only about showing zones; it doesn't change how zones or partitions work on the UNO.
+Each partition device then shows only its own open and bypassed zones. The connection device and the status device still show every zone. The app checks what you enter and shows the result under the box: a zone can't be in two partitions, a zone must be one of your configured zones, and the partition must be one you create. Anything that fails those checks is ignored and reported, never guessed at. Zones you leave out appear only in the panel-wide lists, and a partition with no line shows nothing.
+
+Changing the partitions or zones later can never stop you saving. If an assignment then refers to a partition you no longer create, or a zone that is no longer one of yours, that part is ignored, the preview under the box says why (it refreshes as you change the setting), and the Status section at the top warns. What you typed is left as it is, so the assignment comes back by itself if you restore the partition or zone. This is only about showing zones; it doesn't change how zones or partitions work on the UNO.
 
 ### Requiring a code to arm
 

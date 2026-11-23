@@ -314,3 +314,60 @@ k.section("Keepalive and command timeout settings") {
     k.check("and pushes it", envO.children["uno-connection"].settingsUpdated.any { it[0] == "keepaliveSeconds" && it[1].value == "300" })
     k.check("a new install defaults to a minute", k.newApp([zoneCount: 1])[0].keepaliveDefault() == "60")
 }
+
+k.section("Changing partitions or zones after zones were assigned never blocks saving (envisalink_new: assignments left invalid)") {
+    def (a, env) = k.newApp([zoneCount: 5, partitionSet: "1-2", partitionZones: "1:1-3\n2:4-5"])
+    a.initialize()
+    def conn = env.children["uno-connection"]
+    def pushed = { conn.settingsUpdated.findAll { it[0] == "partitionZones" }.last()[1].value }
+    k.check("starts valid", pushed() == "1:1,2,3;2:4,5" && !a.statusSummary().contains("WARNING"), a.statusSummary())
+
+    // Drop partition 2: its assignment now refers to a partition that isn't created.
+    a.settings.partitionSet = "1"
+    boolean saved = true
+    try { a.updated() } catch (Throwable t) { saved = false; println "    ${t}" }
+    k.check("removing a partition still saves", saved)
+    k.check("the assignment for it is ignored, not pushed", pushed() == "1:1,2,3", pushed())
+    k.check("the preview says why", a.partitionZonesPreview().contains("partition 2 is not one of the partitions you create"), a.partitionZonesPreview())
+    k.check("and the status section warns", a.statusSummary().contains("WARNING: 1 part of Zones per partition is being ignored"), a.statusSummary())
+    k.check("what was typed is left alone, not silently rewritten", a.settings.partitionZones == "1:1-3\n2:4-5")
+
+    // Put it back: nothing was lost.
+    a.settings.partitionSet = "1-2"
+    a.updated()
+    k.check("restoring the partition brings its zones back", pushed() == "1:1,2,3;2:4,5" && !a.statusSummary().contains("WARNING"), pushed())
+
+    // Shrink the zones: zones 4 and 5 no longer exist.
+    a.settings.zoneCount = 3
+    boolean saved2 = true
+    try { a.updated() } catch (Throwable t) { saved2 = false; println "    ${t}" }
+    k.check("removing zones still saves", saved2)
+    k.check("assignments to missing zones are ignored", pushed() == "1:1,2,3", pushed())
+    k.check("and reported", a.partitionZonesPreview().contains("zone 4 is not one of your zones") && a.partitionZonesPreview().contains("zone 5 is not one of your zones") && a.statusSummary().contains("WARNING"), a.partitionZonesPreview())
+
+    a.settings.zoneSet = "1,2"
+    a.updated()
+    k.check("a zone set that excludes more works the same way", pushed() == "1:1,2", pushed())
+
+    a.settings.zoneSet = null; a.settings.zoneCount = 5
+    a.updated()
+    k.check("and everything returns when the zones do", pushed() == "1:1,2,3;2:4,5")
+
+    // Everything assigned becomes invalid at once.
+    a.settings.partitionSet = "3"
+    boolean saved3 = true
+    try { a.updated() } catch (Throwable t) { saved3 = false }
+    k.check("even when no assignment is valid any more, it saves", saved3 && pushed() == "", pushed())
+    k.check("and that is no longer an assignment, so partitions fall back to the default behaviour", a.hasPartitionZones() == false)
+}
+
+k.section("The page refreshes its previews as settings change") {
+    def src = new File(k.repo, "apps/UNOIntegrationApp.groovy").text
+    ["partitionSet", "partitionZones", "zoneCount", "zoneSet", "pgmSet"].each { String name ->
+        // The input call spans several lines; find it and check it asks the page to re-render on change.
+        int pos = src.indexOf("input \"${name}\"")
+        int end = src.indexOf("paragraph", pos)
+        String call = src.substring(pos, end > pos ? end : pos + 600)
+        k.check("${name} re-renders the page when changed, so its preview and warning update straight away", call.contains("submitOnChange: true"), call.take(200))
+    }
+}

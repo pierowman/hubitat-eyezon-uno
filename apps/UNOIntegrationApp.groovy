@@ -32,6 +32,7 @@ def mainPage() {
             input "partitionSet", "text",
                 title: "Partitions to create (e.g. 1 or 1-2 or 1,3)",
                 description: "The UNO supports partitions 1-8. Leave blank for partition 1 only.",
+                submitOnChange: true,
                 required: false
             paragraph rangePreview(settings.partitionSet, 1, 8, "partition", "partition 1 only")
             input "partitionLabel", "text",
@@ -45,6 +46,7 @@ def mainPage() {
             input "partitionZones", "textarea",
                 title: "Zones per partition (optional)",
                 description: "One per line as partitionNumber:zones, e.g. 1:1-8 and 2:9-16. The UNO doesn't say which partition a zone is in, so tell it here. Each partition then shows only its own open and bypassed zones.",
+                submitOnChange: true,
                 required: false
             paragraph partitionZonesPreview()
         }
@@ -64,10 +66,11 @@ def mainPage() {
         }
 
         section("Zone Discovery") {
-            input "zoneCount", "number", title: "Configured Zone Count", defaultValue: 27, required: true
+            input "zoneCount", "number", title: "Configured Zone Count", defaultValue: 27, required: true, submitOnChange: true
             input "zoneSet", "text",
                 title: "Zone set (optional, e.g. 1-8,12,20-27)",
                 description: "Only these zones are created and tracked. Overrides Zone Count when filled in.",
+                submitOnChange: true,
                 required: false
             paragraph rangePreview(settings.zoneSet, 1, 128, "zone", "zones 1-${safeInt(settings.zoneCount, 27)} (from Zone Count)")
             input "autoCreateConfiguredZones", "bool", title: "Pre-create the configured zones at install", defaultValue: true
@@ -116,6 +119,7 @@ Examples:
             input "pgmSet", "text",
                 title: "PGM outputs to create (1-14, e.g. 1 or 1,3-4)",
                 description: "UNO only. Each becomes a button that toggles or pulses the output, depending on how the output is programmed on the panel. The UNO reports no state for a PGM.",
+                submitOnChange: true,
                 required: false
             paragraph rangePreview(settings.pgmSet, 1, 14, "PGM", "no PGM outputs")
             input "pgmNames", "textarea",
@@ -1162,6 +1166,9 @@ private String statusSummary() {
         lines << (settings.masterCode ? "Arming requires the master code" : "WARNING: arming requires a code but no master code is set, so arming is blocked")
     }
     if (settings.enablePanic == true) lines << "Panic commands are ENABLED"
+    // Assignments that no longer match the partitions or zones above are ignored, never an error; say so here.
+    Map zp = parsePartitionZones(settings.partitionZones)
+    if (zp.problems) lines << "WARNING: ${zp.problems.size()} part${zp.problems.size() == 1 ? '' : 's'} of Zones per partition ${zp.problems.size() == 1 ? 'is' : 'are'} being ignored (see Partitions)"
     return lines.join("\n")
 }
 

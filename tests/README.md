@@ -36,7 +36,7 @@ The exit code is non-zero if anything fails.
 | `cases/40_child_drivers.groovy` | Partition and zone drivers |
 | `cases/45_child_features.groovy` | `applyZoneState` on every zone driver, arm with bypass on the partition, the status driver |
 | `cases/50_app.groovy` | Device creation, hints, partitions, zone sets, forwarding, setup checks |
-| `cases/55_app_features.groovy` | Selective save, status device, connection-lost alert, quiet hours, partition filter, repeat suppression, stale sensors, zones per partition, keepalive and timeout settings |
+| `cases/55_app_features.groovy` | Selective save, status device, connection-lost alert, quiet hours, partition filter, repeat suppression, stale sensors, zones per partition (including changing partitions or zones afterwards), keepalive and timeout settings |
 | `cases/60_range_parity.groovy` | The app and the connection driver parse range strings identically |
 | `cases/70_spec_conformance.groovy` | The TPI spec's own examples, the exact bytes of every command, response codes and partition states |
 | `cases/75_robustness.groovy` | Empty, malformed and missing settings and state never crash setup or frame handling (regression guard for an envisalink_new bug where an empty partition spec made a fallback call `.append()` on `None`) |
