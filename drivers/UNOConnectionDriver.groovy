@@ -1,14 +1,22 @@
 import groovy.json.JsonOutput
 import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
+
+// Codes and key presses waiting to be sent. In memory only (shared by every UNO Connection device on the hub),
+// so they are never written to the hub's database and disappear if the hub restarts.
+@Field static final ConcurrentHashMap CODE_VAULT = new ConcurrentHashMap()
 
 metadata {
-    definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess") {
+    definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess",
+               importUrl: "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOConnectionDriver.groovy") {
         capability "Initialize"
+        capability "HealthCheck"
         capability "Refresh"
         capability "Actuator"
         capability "Sensor"
 
         attribute "connectionState", "string"
+        attribute "healthStatus", "enum", ["online", "offline"]
         attribute "alarmSystemStatus", "string"
         attribute "troubleState", "string"
         attribute "troubleDetail", "string"
@@ -54,6 +62,8 @@ metadata {
         command "login"
         command "clearCommandQueue"
         command "clearEventHistory"
+        command "triggerPgm", [[name: "PGM number (1-14)", type: "NUMBER"]]
+        command "debugDump"
         command "poll"
         command "restStartupSync"
     }
@@ -68,6 +78,8 @@ metadata {
         input name: "zoneSet", type: "text", title: "Zone set (optional, e.g. 1-8,12,20-27; overrides zone count)", required: false
         input name: "enablePanic", type: "bool", title: "Allow panic commands (contacts emergency services if the UNO is monitored)", defaultValue: false
         input name: "requireCodeToArm", type: "bool", title: "Require the master code to arm (checked locally; the UNO's arm commands take no code)", defaultValue: false
+        input name: "diagnosticEvents", type: "bool", title: "Publish diagnostic events (last heartbeat, last raw message, panel time). These change constantly and add a lot of database writes", defaultValue: false
+        input name: "recordTestEvents", type: "bool", title: "Record Contact ID test reports in the event history and events", defaultValue: false
         input name: "useRestMetadata", type: "bool", title: "Enable REST metadata/startup sync", defaultValue: true
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
         input name: "traceLogging", type: "bool", title: "Enable trace logging", defaultValue: false
@@ -100,6 +112,8 @@ def initialize() {
     state.lastPartitionBitmap = null
     state.partitionStatus = [:]
     state.troubleBytes = [:]
+    state.zoneTemps = [:]
+    state.partitionTemps = [:]
     state.lastBypassBitmap = null
     state.lastTroubleBitmap = null
     state.loggedIn = false
@@ -118,6 +132,9 @@ def initialize() {
     if (!device.currentValue("alarmSystemStatus")) sendEvent(name: "alarmSystemStatus", value: "unknown")
     if (!device.currentValue("troubleState")) sendEvent(name: "troubleState", value: "unknown")
     if (device.currentValue("eventHistory") == null) sendEvent(name: "eventHistory", value: "[]")
+    if (device.currentValue("healthStatus") == null) sendEvent(name: "healthStatus", value: "offline")
+    // How long the connection may stay silent before the device is considered offline, in seconds.
+    sendEvent(name: "checkInterval", value: safeInt(settings.heartbeatMinutes, 1) * 60 * 2)
 
     scheduleHealthChecks()
     reconnect()
@@ -156,6 +173,7 @@ def reconnect() {
     state.authFailed = false
     state.rxBuffer = ""
     state.lastReconnectTs = now()
+    scheduleOfflineCheck()
 
     Integer p = safePort()
     logInfo("Opening raw socket to ${settings.ip}:${p}")
@@ -201,6 +219,7 @@ def socketStatus(String message) {
         state.loggedIn = false
         state.loginSent = false
         failOutstanding("connection lost")
+        scheduleOfflineCheck()
         // One drop can produce several callbacks; only the first schedules a reconnect (and advances the back-off).
         // After a rejected password the longer delay is already scheduled, so retries can't lock the panel out.
         if (!reconnectPending()) {
@@ -309,7 +328,7 @@ def disarm(String suppliedCode = null, def partition = 1) {
         log.warn "Disarm code must be 4 to 6 digits"
         return
     }
-    enqueueCommand("12", "${p},${code}", "disarm", [log: "${p},${'*' * code.length()}"])
+    enqueueCommand("12", "${p},", "disarm", [secret: code, log: "${p},${'*' * code.length()}"])
 }
 
 // TPI commands 04/05: 3 digit zone number.
@@ -351,7 +370,7 @@ def sendKeys(String keys, def partition = 1) {
 
     for (int i = 0; i < k.length(); i++) {
         // Keys may contain a user code, so never log them.
-        enqueueCommand("03", "${p},${k.substring(i, i + 1)}", "keypress", [log: "${p},*"])
+        enqueueCommand("03", "${p},", "keypress", [secret: k.substring(i, i + 1), log: "${p},*"])
     }
 }
 
@@ -380,6 +399,80 @@ def panic(String type, def partition = 1) {
 def clearCommandQueue() {
     failOutstanding("cleared by user")
     logInfo("Cleared command queue")
+}
+
+private String driverVersion() {
+    return "1.2.0"
+}
+
+// ---- Health: children report online while the connection is authenticated ----
+
+def ping() {
+    poll()
+}
+
+private void markHealth(String value) {
+    if (state.health == value) return
+    state.health = value
+    sendEvent(name: "healthStatus", value: value)
+    parent?.notifyHealth(value)
+}
+
+// A reconnect gets 30 seconds before everything is declared offline, so a brief drop doesn't flap the devices.
+private void scheduleOfflineCheck() {
+    if (state.health == "offline") return
+    if (((state.offlineCheckDueAt ?: 0L) as Long) > now()) return
+    state.offlineCheckDueAt = now() + 30000L
+    runIn(30, "offlineCheck")
+}
+
+def offlineCheck() {
+    state.offlineCheckDueAt = 0L
+    if (device.currentValue("connectionState") != "authenticated") {
+        markHealth("offline")
+    }
+}
+
+// TPI command 0A toggles or pulses a programmable output (UNO only), depending on how it is programmed.
+// A repeat would undo a toggle, so it is never re-sent because of silence.
+def triggerPgm(def pgm) {
+    Integer n = safeInt(pgm, -1)
+    if (n < 1 || n > 14) {
+        logWarn("PGM must be 1 to 14 (got '${pgm}')")
+        return
+    }
+    enqueueCommand("0A", n.toString().padLeft(2, "0"), "pgm${n}", [noRetry: true, pgm: n])
+}
+
+// Logs a redacted snapshot of the integration's state, for troubleshooting and support requests.
+def debugDump() {
+    List<String> lines = []
+    String model = device.currentValue("panelModel")
+    String firmware = device.currentValue("firmwareVersion")
+    String mac = device.currentValue("panelMac")
+    List queue = (state.commandQueue instanceof List) ? state.commandQueue : []
+
+    lines << "UNO Connection ${driverVersion()}"
+    lines << "connection: ${device.currentValue('connectionState')}, health ${state.health ?: 'unknown'}, logged in ${state.loggedIn == true}, password rejected ${state.authFailed == true}"
+    lines << "panel: ${model ?: 'unknown'}, firmware ${firmware ?: 'unknown'}, MAC ${mac ?: 'unknown'}"
+    lines << "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, heartbeat ${settings.heartbeatMinutes ?: '1'}m, watchdog ${settings.watchdogMinutes ?: '3'}m"
+    lines << "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})"
+    lines << "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
+    lines << "timing: last frame ${secondsSince(state.lastFrameTs)}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s"
+    lines << "commands: ${queue.size()} queued (${queue*.name.join(', ') ?: 'none'}), in flight ${state.commandInFlight?.name ?: 'none'}, ${CODE_VAULT.size()} code(s) held in memory"
+    lines << "partitions: ${state.partitionStatus ?: [:]}"
+    lines << "troubles: ${state.troubleBytes ?: [:]}"
+    lines << "last ack: ${device.currentValue('lastAck') ?: 'none'}, last CID: ${state.lastCidEvent ?: 'none'}"
+    ((state.eventHistory instanceof List) ? state.eventHistory : []).take(5).each { Map e ->
+        lines << "event ${e.at} p${e.partition} ${e.type}: ${e.text}"
+    }
+
+    lines.each { String line -> log.info "debugDump: ${redact(line)}" }
+}
+
+private String secondsSince(def ts) {
+    long t = ((ts ?: 0L) as Long)
+    return t > 0L ? "${((now() - t) / 1000L) as Long}s ago" : "never"
 }
 
 def heartbeatCheck() {
@@ -526,8 +619,17 @@ private void enqueueCommand(String cc, String data, String name, Map opts = [:])
     state.commandQueue = state.commandQueue ?: []
 
     Map entry = [cc: cc, data: (data ?: ""), name: name, ts: now()]
-    ["log", "noRetry", "partition"].each { String key ->
+    ["log", "noRetry", "partition", "pgm"].each { String key ->
         if (opts[key] != null) entry[key] = opts[key]
+    }
+
+    // A code or key press is kept in memory only. The queue lives in state (the hub's database), so it
+    // holds a reference and the command text is finished from the vault at send time.
+    if (opts.secret != null) {
+        state.secretSeq = safeInt(state.secretSeq, 0) + 1
+        String key = "${device.id}:${state.secretSeq}".toString()
+        CODE_VAULT[key] = opts.secret.toString()
+        entry.secretKey = key
     }
 
     if (opts.priority) {
@@ -540,6 +642,22 @@ private void enqueueCommand(String cc, String data, String name, Map opts = [:])
     // Backstop so a command stuck behind a dead connection still expires without any other activity.
     runIn(queueMaxAgeSeconds() + 5, "expireQueue")
     processQueue()
+}
+
+// The data to send for a command: its stored text plus the secret part, if it has one.
+// Returns null when the secret is gone (the hub restarted), which means the command can't be sent.
+private String commandData(Map c) {
+    String data = (c.data ?: "").toString()
+    if (c.secretKey) {
+        String secret = CODE_VAULT[c.secretKey]
+        if (secret == null) return null
+        data += secret
+    }
+    return data
+}
+
+private void releaseSecret(def c) {
+    if (c?.secretKey) CODE_VAULT.remove(c.secretKey)
 }
 
 // A command that hasn't been sent within this time is dropped rather than run late.
@@ -559,6 +677,7 @@ private void expireStaleCommands() {
     if (!stale) return
 
     state.commandQueue.removeAll(stale)
+    stale.each { releaseSecret(it) }
     reportDropped(stale, "waited more than ${queueMaxAgeSeconds()}s to be sent")
 }
 
@@ -573,6 +692,7 @@ private void failOutstanding(String reason) {
     unschedule("commandTimeoutCheck")
     unschedule("retryInFlight")
 
+    dropped.each { releaseSecret(it) }
     if (dropped) reportDropped(dropped, reason)
 }
 
@@ -612,6 +732,8 @@ private void processQueue() {
         log      : next.log,
         noRetry  : next.noRetry,
         partition: next.partition,
+        pgm      : next.pgm,
+        secretKey: next.secretKey,
         sentAt   : now(),
         retries  : 0,
         overruns : 0,
@@ -627,8 +749,18 @@ private void sendInFlight() {
     def inflight = state.commandInFlight
     if (!inflight) return
 
-    String cmd = tpiCommand(inflight.cc as String, inflight.data as String)
-    String logCmd = tpiCommand(inflight.cc as String, (inflight.log ?: inflight.data) as String)
+    String data = commandData(inflight)
+    if (data == null) {
+        // The code was only ever held in memory, so after a hub restart there is nothing to send.
+        logWarn("${inflight.name} dropped: its code is no longer available")
+        sendEvent(name: "lastAck", value: "dropped:${inflight.name}", isStateChange: true)
+        state.commandInFlight = null
+        processQueue()
+        return
+    }
+
+    String cmd = tpiCommand(inflight.cc as String, data)
+    String logCmd = tpiCommand(inflight.cc as String, (inflight.log ?: data) as String)
     rawSend(cmd + "\r\n", logCmd + "\r\n")
     runIn(4, "commandTimeoutCheck")
 }
@@ -661,6 +793,7 @@ def commandTimeoutCheck() {
     } else {
         logWarn("Command timeout: ${inflight.name}" + (inflight.noRetry ? " (not retried)" : ""))
         sendEvent(name: "lastAck", value: "timeout:${inflight.name}")
+        releaseSecret(inflight)
         state.commandInFlight = null
         // Silence after a command (and its retry) means the link is dead; reconnecting also drops the
         // commands queued behind it, which would otherwise run late.
@@ -683,7 +816,9 @@ def parse(String message) {
     if (decoded == null) return
 
     state.lastFrameTs = now()
-    sendEvent(name: "lastHeartbeat", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
+    if (settings.diagnosticEvents == true) {
+        sendEvent(name: "lastHeartbeat", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
+    }
 
     state.rxBuffer = (state.rxBuffer ?: "") + decoded
 
@@ -752,7 +887,9 @@ private String decodeIncoming(String message) {
 }
 
 private void parseFrame(String frame) {
-    sendEvent(name: "lastRawMessage", value: frame.take(1024))
+    if (settings.diagnosticEvents == true) {
+        sendEvent(name: "lastRawMessage", value: frame.take(1024))
+    }
 
     if (frame.equalsIgnoreCase("OK")) {
         state.loggedIn = true
@@ -761,6 +898,9 @@ private void parseFrame(String frame) {
         state.authenticatedAt = now()
         logInfo("UNO login successful")
         sendEvent(name: "connectionState", value: "authenticated")
+        unschedule("offlineCheck")
+        state.offlineCheckDueAt = 0L
+        markHealth("online")
 
         if (settings.useRestMetadata == true && state.restStartupDone != true) {
             try {
@@ -831,6 +971,12 @@ private void parseFrame(String frame) {
             break
         case "06":
             handleTroubleBitmap(parts)
+            break
+        case "07":
+            handleZoneTemperatures(parts)
+            break
+        case "08":
+            handlePartitionTemperatures(parts)
             break
         case "09":
             handleSystemMessage(parts)
@@ -1001,7 +1147,11 @@ private void parseAckFrame(String frame) {
         Integer chimePartition = safeInt(inflight.partition, 1)
         if (chimePartition == 1) sendEvent(name: "chime", value: chime)
         parent?.notifyPartitionEvents(chimePartition, [[name: "chime", value: chime]])
+    } else if (inflight.pgm) {
+        // No state comes back for a PGM, so the best we can say is when the panel last accepted a trigger.
+        parent?.notifyPgmEvents(inflight.pgm as Integer, [[name: "lastTriggered", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone), isStateChange: true]])
     }
+    releaseSecret(inflight)
     state.commandInFlight = null
 
     processQueue()
@@ -1163,8 +1313,14 @@ private void handleCidEvent(List<String> parts) {
 
     if (zone <= 0 || !configuredZones().contains(zone)) return
 
+    // Tamper is its own condition, not the zone opening, so it updates a tamper attribute instead.
+    if (TAMPER_CODES.contains(eventCode) && (isEvent || isRestore)) {
+        routeTamperUpdate(zone, isEvent)
+        return
+    }
+
     Set<String> fastPathZoneCodes = [
-        "110", "113", "130", "131", "132", "134", "137", "144", "154", "162"
+        "110", "113", "130", "131", "132", "134", "154", "162"
     ] as Set
 
     // Only zone-type codes carry a zone number; for others (e.g. arm/disarm) it is a user ID.
@@ -1182,6 +1338,9 @@ private void handleCidEvent(List<String> parts) {
     emitZoneFastEvent(zone, active)
     routeZoneUpdate(zone, active, active ? "1" : "0")
 }
+
+// Contact ID codes that mean "this zone's sensor was tampered with" (137 tamper, 144 sensor tamper, 383 sensor tamper trouble).
+@Field static final Set TAMPER_CODES = ["137", "144", "383"] as Set
 
 private String suggestTypeFromCid(String eventCode) {
     switch (eventCode) {
@@ -1343,11 +1502,24 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
     if (!(qualifier in ["1", "3"])) return
 
     Map d = describeCid(qualifier, code, zoneOrUser)
+
+    // Periodic and manual test reports are routine noise unless asked for.
+    if (d.category == "test" && settings.recordTestEvents != true) {
+        logDebug("Not recording test report ${code}")
+        return
+    }
+
     String at = new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone)
 
     sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
     sendEvent(name: "lastEventType", value: d.category, isStateChange: true)
     recordEventHistory([at: at, partition: partition, code: code, type: d.category, text: d.text])
+
+    try {
+        parent?.notifyEvent([category: d.category, text: d.text, partition: partition, restore: qualifier == "3"])
+    } catch (e) {
+        logDebug("Failed to send notification for CID ${code}: ${e}")
+    }
 
     try {
         sendLocationEvent(
@@ -1421,6 +1593,24 @@ private void handleBypassBitmap(List<String> parts) {
     }
 }
 
+// Tamper changes only update existing zone devices; they never create new ones.
+private void routeTamperUpdate(Integer zone, boolean tampered) {
+    def child = findZoneChild("uno-zone-${zone}")
+    if (!child) return
+
+    logInfo("Zone ${zone} tamper ${tampered ? 'detected' : 'cleared'}")
+    try {
+        child.sendEvent(
+            name: "tamper",
+            value: tampered ? "detected" : "clear",
+            descriptionText: "Zone ${zone} tamper ${tampered ? 'detected' : 'cleared'}",
+            isStateChange: true
+        )
+    } catch (e) {
+        logDebug("Failed to update tamper state for zone ${zone}: ${e}")
+    }
+}
+
 // Bypass changes only update existing zone devices; they never create new ones.
 private void routeBypassUpdate(Integer zone, boolean bypassed) {
     def child = findZoneChild("uno-zone-${zone}")
@@ -1451,7 +1641,7 @@ private void handlePanelInfo(List<String> parts) {
     if (mac) sendEvent(name: "panelMac", value: mac)
     if (model) sendEvent(name: "panelModel", value: model)
     if (fw) sendEvent(name: "firmwareVersion", value: fw)
-    if (panelTime) sendEvent(name: "panelTime", value: panelTime)
+    if (panelTime && settings.diagnosticEvents == true) sendEvent(name: "panelTime", value: panelTime)
 
     logDebug("Panel info: model=${model}, fw=${fw}, partition=${defaultPartition}, mac=${mac}, time=${panelTime}")
 }
@@ -1530,6 +1720,74 @@ private Integer safeParseHex(String s, Integer fallback = 0) {
         return Integer.parseInt(s, 16)
     } catch (ignored) {
         return fallback
+    }
+}
+
+// Temperatures arrive as one byte in Envisacor format, C = byte / 2 - 40, where 00 means unknown or not applicable.
+private BigDecimal envisacorToCelsius(String byteHex) {
+    return (safeParseHex(byteHex, 0) / 2.0G) - 40.0G
+}
+
+// Converted to the hub's temperature scale, with the unit Hubitat expects.
+private Map temperatureEvent(String name, BigDecimal celsius) {
+    return [name: name, value: convertTemperatureIfNeeded(celsius, "C", 1), unit: "°${location.temperatureScale ?: 'C'}".toString()]
+}
+
+// %07 carries one temperature byte per zone (up to 128), for RF sensors that report it. Only zones whose
+// reading changed are forwarded, and only to existing zone devices.
+private void handleZoneTemperatures(List<String> parts) {
+    if (parts.size() < 2) return
+
+    String payload = cleanPayload(parts[1]).toUpperCase()
+    if (!(payload ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed zone temperature frame: ${payload.take(64)}")
+        return
+    }
+
+    state.zoneTemps = state.zoneTemps ?: [:]
+    for (Integer zone : configuredZones()) {
+        int idx = (zone - 1) * 2
+        if (idx + 2 > payload.length()) break
+
+        String byteHex = payload.substring(idx, idx + 2)
+        if (byteHex == "00" || byteHex == state.zoneTemps["${zone}"]) continue
+        state.zoneTemps["${zone}"] = byteHex
+
+        def child = findZoneChild("uno-zone-${zone}")
+        if (!child) continue
+        try {
+            child.sendEvent(temperatureEvent("temperature", envisacorToCelsius(byteHex)))
+        } catch (e) {
+            logDebug("Failed to update temperature for zone ${zone}: ${e}")
+        }
+    }
+}
+
+// %08 carries the inside temperatures of partitions 1-8, then the outside temperatures of partitions 1-8.
+private void handlePartitionTemperatures(List<String> parts) {
+    if (parts.size() < 2) return
+
+    String payload = cleanPayload(parts[1]).toUpperCase()
+    if (!(payload ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed partition temperature frame: ${payload.take(64)}")
+        return
+    }
+
+    state.partitionTemps = state.partitionTemps ?: [:]
+    for (int idx = 0; idx < 8 && (idx * 2 + 2) <= payload.length(); idx++) {
+        Integer partition = idx + 1
+        List events = []
+
+        [[kind: "inside", attr: "temperature", offset: idx * 2], [kind: "outside", attr: "outsideTemperature", offset: (8 + idx) * 2]].each { Map t ->
+            if (t.offset + 2 > payload.length()) return
+            String byteHex = payload.substring(t.offset as int, (t.offset as int) + 2)
+            String key = "${partition}-${t.kind}".toString()
+            if (byteHex == "00" || byteHex == state.partitionTemps[key]) return
+            state.partitionTemps[key] = byteHex
+            events << temperatureEvent(t.attr as String, envisacorToCelsius(byteHex))
+        }
+
+        if (events) parent?.notifyPartitionEvents(partition, events)
     }
 }
 

@@ -126,7 +126,10 @@ k.section("Zone drivers: bypass commands and attributes") {
         z.device.deviceNetworkId = "uno-zone-12"
 
         z.installed()
-        k.check("${file}: installed sets ${attr}, zone digit and bypassed", z.lastAttr(attr) != null && z.lastAttr("zoneStateDigit") == "0" && z.lastAttr("bypassed") == "false", z.currentVals)
+        k.check("${file}: installed sets ${attr}, zone digit, bypassed and tamper", z.lastAttr(attr) != null && z.lastAttr("zoneStateDigit") == "0" && z.lastAttr("bypassed") == "false" && z.lastAttr("tamper") == "clear", z.currentVals)
+        z.ping()
+        k.check("${file}: ping asks the panel for a refresh", app.calls == ["refreshAll"], app.calls)
+        app.calls.clear(); app.callArgs.clear()
         z.bypass(); z.unbypass()
         k.check("${file}: bypass/unbypass use the zone number from the device id", app.callArgs == [["bypassZone", [12]], ["unbypassZone", [12]]], app.callArgs)
     }

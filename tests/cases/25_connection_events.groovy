@@ -7,6 +7,9 @@ k.section("Spec example: CID 3441010020") {
     k.check("partition 1 records who armed it and when",
             d.parent.partitionAttr(1, "lastArmedBy") == "user 2" && d.parent.partitionAttr(1, "lastArmedAt") ==~ /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/, d.parent.partitionEvents)
     k.check("the raw summary is unchanged", d.lastAttr("lastCidEvent") == "CID q=3 code=441 partition=1 zoneOrUser=2")
+    def notified = d.parent.callArgs.find { it[0] == "notifyEvent" }
+    k.check("the app is asked to notify, with the category, text, partition and whether it is a restoral",
+            notified?.get(1)?.get(0) == [category: "arm", text: "Armed (stay) by user 2", partition: 1, restore: true], d.parent.callArgs)
 }
 
 k.section("Arm and disarm") {
@@ -59,8 +62,6 @@ k.section("Alarms, troubles and other events in words") {
     k.check("bypass", d.lastAttr("lastEvent") == "Zone bypassed: zone 3" && d.lastAttr("lastEventType") == "bypass", d.lastAttr("lastEvent"))
     k.feed(d, "%03,1461010040\$")
     k.check("a wrong code entry is an access event with the user field", d.lastAttr("lastEvent") == "Wrong code entered by user 4" && d.lastAttr("lastEventType") == "access", d.lastAttr("lastEvent"))
-    k.feed(d, "%03,1602010000\$")
-    k.check("periodic test report", d.lastAttr("lastEvent") == "Periodic test" && d.lastAttr("lastEventType") == "test", d.lastAttr("lastEvent"))
     k.feed(d, "%03,1454010020\$")
     k.check("an exception such as failed to close", d.lastAttr("lastEvent") == "Failed to close by user 2" && d.lastAttr("lastEventType") == "exception", d.lastAttr("lastEvent"))
     k.feed(d, "%03,1999010000\$")

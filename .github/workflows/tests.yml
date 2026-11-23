@@ -6,15 +6,28 @@ on:
 
 jobs:
   test:
+    name: tests (Groovy ${{ matrix.groovy }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Current Groovy.
+          - groovy: "4.0"
+            java: "17"
+          # The Groovy line Hubitat runs; catches newer-only syntax and APIs.
+          - groovy: "2.4.21"
+            java: "8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ matrix.java }}
       - uses: wtfjoke/setup-groovy@v3
         with:
-          groovy-version: "4.0"
+          groovy-version: ${{ matrix.groovy }}
+      - name: Syntax check
+        run: groovy tests/syntax-check.groovy
       - name: Run tests
         run: groovy tests/run.groovy

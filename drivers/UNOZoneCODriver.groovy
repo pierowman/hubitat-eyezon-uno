@@ -1,11 +1,16 @@
 metadata {
-    definition(name: "UNO Zone CO", namespace: "uno", author: "Eric Hess") {
+    definition(name: "UNO Zone CO", namespace: "uno", author: "Eric Hess",
+               importUrl: "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneCODriver.groovy") {
         capability "Sensor"
         capability "CarbonMonoxideDetector"
+        capability "TamperAlert"
+        capability "TemperatureMeasurement"
+        capability "HealthCheck"
 
         attribute "zoneStateDigit", "string"
         attribute "lastFault", "string"
         attribute "bypassed", "string"
+        attribute "healthStatus", "enum", ["online", "offline"]
 
         command "bypass"
         command "unbypass"
@@ -16,7 +21,11 @@ def installed() {
     sendEvent(name: "carbonMonoxide", value: "clear")
     sendEvent(name: "zoneStateDigit", value: "0")
     sendEvent(name: "bypassed", value: "false")
+    sendEvent(name: "tamper", value: "clear")
 }
+
+// HealthCheck: ask the panel for a full state refresh.
+def ping() { parent?.refreshAll() }
 
 // The zone number comes from the device network ID (uno-zone-N) set by the app.
 private Integer zoneNumber() {

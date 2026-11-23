@@ -240,6 +240,60 @@ k.section("Require code to arm") {
     k.check("with no master code configured, arming is blocked and the reason is logged", none.sent.isEmpty() && none.warns().any { it.contains("no master code is configured") }, none.warns())
 }
 
+k.section("Codes are kept out of the hub's database") {
+    def json = { HubBase h -> groovy.json.JsonOutput.toJson(h.state) }
+
+    def d = k.authed(masterCode: "")
+    d.disarm("4821")
+    d.disarm("7391", 2)
+    k.check("neither the in-flight nor the queued code is in state", !json(d).contains("4821") && !json(d).contains("7391"), json(d))
+    k.check("both are held in memory", d.CODE_VAULT.values().containsAll(["4821", "7391"]), d.CODE_VAULT)
+    k.check("the first is sent with its code", d.sent == ["^12,1,4821\$\r\n"], d.sent)
+    k.ack(d, "12")
+    k.check("the queued one is sent with its own code and the first is released", d.sent.last() == "^12,2,7391\$\r\n" && !d.CODE_VAULT.values().contains("4821"), d.sent)
+    k.ack(d, "12")
+    k.check("nothing is left in memory once they are done", d.CODE_VAULT.isEmpty(), d.CODE_VAULT)
+
+    def r = k.authed(masterCode: "")
+    r.disarm("5555")
+    r.nowMs += 4000; r.commandTimeoutCheck()
+    k.check("a timeout retry re-sends the same code", r.sent == ["^12,1,5555\$\r\n", "^12,1,5555\$\r\n"] && !json(r).contains("5555"), r.sent)
+    r.nowMs += 4000; r.commandTimeoutCheck()
+    k.check("giving up releases the code", r.CODE_VAULT.isEmpty(), r.CODE_VAULT)
+
+    def b = k.authed(masterCode: "")
+    b.disarm("6666")
+    k.ack(b, "12", "1"); b.retryInFlight()
+    k.check("a busy retry re-sends the same code", b.sent == ["^12,1,6666\$\r\n", "^12,1,6666\$\r\n"], b.sent)
+    k.ack(b, "12", "7")
+    k.check("a rejected code is released too", b.CODE_VAULT.isEmpty())
+
+    def x = k.authed(masterCode: "")
+    x.disarm("1111"); x.disarm("2222")
+    x.reconnect()
+    k.check("a reconnect releases every waiting code", x.CODE_VAULT.isEmpty(), x.CODE_VAULT)
+
+    def e = k.newConn(masterCode: ""); e.initialize()
+    e.disarm("3333")
+    e.nowMs += 31000L; e.expireQueue()
+    k.check("an expired command releases its code", e.CODE_VAULT.isEmpty() && e.lastAttr("lastAck") == "dropped:disarm", e.CODE_VAULT)
+
+    def h = k.authed(masterCode: "")
+    h.armStay(); h.disarm("9999")
+    h.CODE_VAULT.clear()   // what a hub restart does
+    k.ack(h, "08")
+    k.check("after a restart a queued code can't be sent, and the command is dropped", h.sent.size() == 1 && h.lastAttr("lastAck") == "dropped:disarm" && h.state.commandInFlight == null, [h.sent, h.lastAttr("lastAck")])
+    k.check("with a warning", h.warns().any { it.contains("code is no longer available") }, h.warns())
+
+    def kp = k.authed()
+    kp.sendKeys("5678")
+    k.check("key presses are held out of state too", !json(kp).contains("5678") && kp.CODE_VAULT.size() == 4, json(kp))
+
+    def m = k.authed(masterCode: "4321")
+    m.disarm()
+    k.check("the configured master code is never stored in state by a disarm", m.sent == ["^12,1,4321\$\r\n"] && !json(m).contains("\"data\":\"1,4321\""), m.sent)
+}
+
 k.section("Zone bypass commands") {
     def d = k.authed()
     d.bypassZone(5)
@@ -274,7 +328,10 @@ k.section("Keypresses (command 03)") {
 
     d.sent.clear()
     d.sendKeys(" 1 2 # ")
-    k.check("whitespace is ignored, partition defaults to 1", d.sent == ["^03,1,1\$\r\n"] && d.state.commandQueue*.data == ["1,2", "1,#"], [d.sent, d.state.commandQueue])
+    k.check("whitespace is ignored, partition defaults to 1", d.sent == ["^03,1,1\$\r\n"], d.sent)
+    k.check("queued keys hold no key text in state", d.state.commandQueue*.data == ["1,", "1,"] && d.state.commandQueue.every { it.secretKey }, d.state.commandQueue)
+    k.ack(d, "03"); k.ack(d, "03")
+    k.check("the remaining keys are sent in order", d.sent == ["^03,1,1\$\r\n", "^03,1,2\$\r\n", "^03,1,#\$\r\n"], d.sent)
 
     def bad = k.authed()
     bad.sendKeys("12a"); bad.sendKeys(""); bad.sendKeys("1234567890123"); bad.sendKeys(null); bad.sendKeys("12", 9)

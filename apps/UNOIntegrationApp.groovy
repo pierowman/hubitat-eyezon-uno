@@ -4,6 +4,7 @@ definition(
     author: "Eric Hess",
     description: "Hubitat integration for the EyezOn UNO alarm system",
     category: "Safety & Security",
+    importUrl: "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/apps/UNOIntegrationApp.groovy",
     iconUrl: "https://raw.githubusercontent.com/hubitat/HubitatPublic/master/resources/icons/app-Coordinator.png",
     iconX2Url: "https://raw.githubusercontent.com/hubitat/HubitatPublic/master/resources/icons/app-Coordinator@2x.png",
     iconX3Url: "https://raw.githubusercontent.com/hubitat/HubitatPublic/master/resources/icons/app-Coordinator@2x.png"
@@ -106,9 +107,38 @@ Examples:
             paragraph "Off by default. If your UNO is professionally monitored, a panic command contacts emergency services. When off, panic commands are ignored."
         }
 
+        section("PGM Outputs (optional)") {
+            input "pgmSet", "text",
+                title: "PGM outputs to create (1-14, e.g. 1 or 1,3-4)",
+                description: "UNO only. Each becomes a button that toggles or pulses the output, depending on how the output is programmed on the panel. The UNO reports no state for a PGM.",
+                required: false
+            paragraph rangePreview(settings.pgmSet, 1, 14, "PGM", "no PGM outputs")
+            input "pgmNames", "textarea",
+                title: "PGM names (optional)",
+                description: "One per line as pgmNumber:Name, e.g. 1:Garage Door",
+                required: false
+        }
+
+        section("Notifications (optional)") {
+            input "notifyDevices", "capability.notification",
+                title: "Send notifications to",
+                multiple: true,
+                required: false
+            input "notifyAlarms", "bool", title: "Alarms (burglary, fire, panic, CO, water and so on)", defaultValue: true
+            input "notifyTroubles", "bool", title: "Troubles and their restorals (AC loss, low battery, tamper)", defaultValue: true
+            input "notifyArmDisarm", "bool", title: "Armed and disarmed, and by whom", defaultValue: false
+        }
+
         section("Logging / Health") {
             input "debugLogging", "bool", title: "Enable debug logging", defaultValue: false
             input "traceLogging", "bool", title: "Enable trace logging", defaultValue: false
+            input "diagnosticEvents", "bool",
+                title: "Publish diagnostic events (last heartbeat, last raw message, panel time)",
+                defaultValue: false
+            paragraph "Off by default: these change on every frame and add a lot of database writes to the hub."
+            input "recordTestEvents", "bool",
+                title: "Record Contact ID test reports in the event history",
+                defaultValue: false
             input "heartbeatMinutes", "enum",
                 title: "Heartbeat interval",
                 options: ["1":"Every 1 minute", "5":"Every 5 minutes", "10":"Every 10 minutes"],
@@ -137,6 +167,7 @@ def initialize() {
     state.zoneHintsMap = parseZoneHints(settings.zoneHints)
     state.partitionHintsMap = parseNumberedNames(settings.partitionHints)
     state.userNamesMap = parseNumberedNames(settings.userNames)
+    state.pgmNamesMap = parseNumberedNames(settings.pgmNames)
     state.restZoneLabels = state.restZoneLabels ?: [:]
     state.restPartitionLabels = state.restPartitionLabels ?: [:]
     state.restSystemName = state.restSystemName ?: null
@@ -154,6 +185,7 @@ def initialize() {
     }
 
     ensurePartitionDevices()
+    ensurePgmDevices()
 
     if (settings.autoCreateConfiguredZones != false) {
         configuredZones().each { Integer zoneNum ->
@@ -205,7 +237,7 @@ private void ensurePartitionDevice(Integer partition) {
     def dev = getChildDevice(dni)
 
     if (!dev) {
-        addChildDevice(
+        def created = addChildDevice(
             "uno",
             "UNO Partition",
             dni,
@@ -215,6 +247,7 @@ private void ensurePartitionDevice(Integer partition) {
                 isComponent: true
             ]
         )
+        applyHealth(created)
         logInfo("Created partition device: ${label}")
     } else {
         try {
@@ -224,6 +257,31 @@ private void ensurePartitionDevice(Integer partition) {
             }
         } catch (e) {
             log.warn "Unable to update partition label: ${e}"
+        }
+    }
+}
+
+// PGM outputs are optional buttons; one device per output in the set.
+private void ensurePgmDevices() {
+    Map names = (state.pgmNamesMap instanceof Map) ? state.pgmNamesMap : [:]
+    parseRange(settings.pgmSet, 1, 14).values.each { Integer pgm ->
+        String dni = "uno-pgm-${pgm}"
+        String label = names["${pgm}"]?.toString()?.trim() ?: "PGM ${pgm}"
+        def dev = getChildDevice(dni)
+
+        if (!dev) {
+            def created = addChildDevice("uno", "UNO PGM", dni, [name: label, label: label, isComponent: true])
+            applyHealth(created)
+            logInfo("Created PGM device: ${label}")
+        } else {
+            try {
+                if (dev.label != label) {
+                    dev.setLabel(label)
+                    logInfo("Updated PGM ${pgm} label to ${label}")
+                }
+            } catch (e) {
+                log.warn "Unable to update PGM label: ${e}"
+            }
         }
     }
 }
@@ -253,6 +311,8 @@ private void applyConnectionSettings() {
     conn.updateSetting("zoneSet", [value: settings.zoneSet ?: "", type: "text"])
     conn.updateSetting("enablePanic", [value: settings.enablePanic == true, type: "bool"])
     conn.updateSetting("requireCodeToArm", [value: settings.requireCodeToArm == true, type: "bool"])
+    conn.updateSetting("diagnosticEvents", [value: settings.diagnosticEvents == true, type: "bool"])
+    conn.updateSetting("recordTestEvents", [value: settings.recordTestEvents == true, type: "bool"])
     conn.updateSetting("useRestMetadata", [value: settings.useRestMetadata == true, type: "bool"])
     conn.updateSetting("debugLogging", [value: settings.debugLogging == true, type: "bool"])
     conn.updateSetting("traceLogging", [value: settings.traceLogging == true, type: "bool"])
@@ -262,6 +322,65 @@ private void applyConnectionSettings() {
 
 def refreshAll() {
     getChildDevice("uno-connection")?.refreshAll()
+}
+
+def triggerPgm(def pgm) {
+    getChildDevice("uno-connection")?.triggerPgm(pgm)
+}
+
+// Forwards attribute events from the connection device to a PGM device.
+def notifyPgmEvents(Integer pgm, List events) {
+    def dev = getChildDevice("uno-pgm-${pgm}")
+    if (!dev) return
+    events?.each { Map e -> dev.sendEvent(e) }
+}
+
+// The connection device says whether the panel is reachable; every other device mirrors it.
+def notifyHealth(String value) {
+    state.health = value
+    getChildDevices()?.each { dev ->
+        if (dev.deviceNetworkId != "uno-connection") dev.sendEvent(name: "healthStatus", value: value)
+    }
+}
+
+// A device created after the connection came up still needs to know the current state.
+private void applyHealth(def dev) {
+    try {
+        dev?.sendEvent(name: "healthStatus", value: state.health ?: "offline")
+    } catch (ignored) {
+    }
+}
+
+// Sends the alarm, trouble and arm/disarm notifications that are switched on. Test reports never notify.
+def notifyEvent(Map event) {
+    def devices = settings.notifyDevices
+    if (!devices) return
+
+    String category = event.category
+    boolean restore = event.restore == true
+    boolean wanted = false
+    switch (category) {
+        case "alarm":
+            wanted = settings.notifyAlarms != false && !restore
+            break
+        case "trouble":
+        case "supervisory":
+            wanted = settings.notifyTroubles != false
+            break
+        case "arm":
+        case "disarm":
+            wanted = settings.notifyArmDisarm == true
+            break
+    }
+    if (!wanted) return
+
+    String where = configuredPartitions().size() > 1 ? "${partitionLabelFor(safeInt(event.partition, 1))}: " : ""
+    String message = "${where}${event.text}".toString()
+    try {
+        devices.each { it.deviceNotification(message) }
+    } catch (e) {
+        log.warn "Could not send notification: ${e}"
+    }
 }
 
 def armStay(def partition = 1, String code = null) {
@@ -360,7 +479,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
             "contact"
         ))
 
-        addChildDevice(
+        def created = addChildDevice(
             "uno",
             desiredDriver,
             dni,
@@ -370,6 +489,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
                 isComponent: true
             ]
         )
+        applyHealth(created)
         logDebug("Created zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
         return
     }
@@ -385,7 +505,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
             return
         }
 
-        addChildDevice(
+        def recreated = addChildDevice(
             "uno",
             desiredDriver,
             dni,
@@ -395,6 +515,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
                 isComponent: true
             ]
         )
+        applyHealth(recreated)
         logInfo("Recreated zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
         return
     }

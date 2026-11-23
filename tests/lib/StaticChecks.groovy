@@ -12,7 +12,7 @@ class StaticChecks {
     static final Set HUBITAT_API = ["sendEvent", "sendLocationEvent", "runIn", "runEvery1Minute", "runEvery5Minutes",
         "runEvery10Minutes", "runEvery30Minutes", "unschedule", "schedule", "now", "httpGet", "addChildDevice",
         "getChildDevice", "getChildDevices", "deleteChildDevice", "definition", "preferences", "page", "dynamicPage",
-        "section", "input", "paragraph", "metadata", "capability", "attribute", "command", "println"] as Set
+        "section", "input", "paragraph", "metadata", "capability", "attribute", "command", "println", "convertTemperatureIfNeeded"] as Set
 
     static List<File> groovyFiles(File repo) {
         List<File> files = []
@@ -58,6 +58,9 @@ class StaticChecks {
                     listed << rel
                     k.check("manifest entry exists: ${rel}", new File(k.repo, rel).isFile())
                     k.check("manifest entry has no placeholder: ${entry.name}", !loc.contains("<") && !loc.contains(">"))
+                    // Each file's importUrl lets the hub update it in place, so it must point at the same file.
+                    String source = new File(k.repo, rel).isFile() ? new File(k.repo, rel).text : ""
+                    k.check("${rel} has an importUrl matching the manifest", source.contains("importUrl: \"${loc}\""), loc)
                 }
                 files.each { File f ->
                     String rel = f.parentFile.name + "/" + f.name
@@ -91,7 +94,7 @@ class StaticChecks {
         def visitor = new ClassCodeVisitorSupport() {
             SourceUnit getSourceUnit() { null }
             void visitMethodCallExpression(MethodCallExpression call) {
-                if (call.implicitThis && call.methodAsString) {
+                if (call.implicitThis && call.methodAsString && call.lineNumber > 0) {
                     callsites.get(call.methodAsString, new TreeSet()) << call.lineNumber
                 }
                 super.visitMethodCallExpression(call)

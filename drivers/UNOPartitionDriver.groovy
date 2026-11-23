@@ -1,8 +1,11 @@
 metadata {
-    definition(name: "UNO Partition", namespace: "uno", author: "Eric Hess") {
+    definition(name: "UNO Partition", namespace: "uno", author: "Eric Hess",
+               importUrl: "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOPartitionDriver.groovy") {
         capability "Actuator"
         capability "Sensor"
         capability "Refresh"
+        capability "HealthCheck"
+        capability "TemperatureMeasurement"
         capability "Alarm"
         capability "SecurityKeypad"
         attribute "alarmSystemStatus", "string"
@@ -30,6 +33,8 @@ metadata {
         attribute "lastDisarmedBy", "string"
         attribute "lastDisarmedAt", "string"
         attribute "lastArmMode", "string"
+        attribute "outsideTemperature", "number"
+        attribute "healthStatus", "enum", ["online", "offline"]
         command "armStay"
         command "armAway"
         command "armStayWithCode", [[name: "Code", type: "STRING"]]
@@ -73,6 +78,8 @@ private Integer partitionNumber() {
 }
 
 def refresh() { parent?.refreshAll() }
+// HealthCheck: ask the panel for a full state refresh.
+def ping() { parent?.refreshAll() }
 def armStay() { parent?.armStay(partitionNumber()); sendEvent(name: "lastUserAction", value: "armStay", isStateChange: true) }
 def armStayWithCode(String code) { parent?.armStay(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armStay", isStateChange: true) }
 def armAwayWithCode(String code) { parent?.armAway(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armAway", isStateChange: true) }

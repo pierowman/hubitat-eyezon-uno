@@ -2,11 +2,11 @@
   "packageName": "EyezOn UNO Hubitat Integration",
   "minimumHEVersion": "2.3.0",
   "author": "Eric Hess",
-  "version": "1.1.0",
-  "dateReleased": "2026-03-16",
+  "version": "1.2.0",
+  "dateReleased": "2026-11-22",
   "documentationLink": "https://github.com/pierowman/hubitat-eyezon-uno",
   "communityLink": "https://community.hubitat.com/",
-  "releaseNotes": "Added optional UNO REST integration for automatic zone labels, partition label, system name, and startup zone-state synchronization. TPI remains the real-time event and control path.",
+  "releaseNotes": "Multiple partitions (1-8), zone bypass, keypress and optional panic commands, zone sets, optional require-code-to-arm and a SecurityKeypad partition device. Contact ID events are now described in words (who armed or disarmed, which sensor alarmed) with an event history, per-partition last armed/disarmed by, and an unoEvent location event. Per-partition trouble decoding, zone temperatures, PGM output buttons, tamper reported as tamper (not an open/closed zone), and online/offline status on every device. Exponential reconnect back-off; queued commands never run late, and a busy panel is retried. Disarm codes are no longer written to the hub database. Optional alarm, trouble and arm/disarm notifications. Diagnostic events are now opt-in to cut database writes. Added a debugDump command and a test suite.",
   "licenseFile": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/LICENSE",
   "apps": [
     {
@@ -67,6 +67,13 @@
       "namespace": "uno",
       "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOZoneWaterDriver.groovy",
       "required": true
+    },
+    {
+      "id": "uno-driver-pgm-0001",
+      "name": "UNO PGM",
+      "namespace": "uno",
+      "location": "https://raw.githubusercontent.com/pierowman/hubitat-eyezon-uno/main/drivers/UNOPGMDriver.groovy",
+      "required": false
     }
   ]
 }

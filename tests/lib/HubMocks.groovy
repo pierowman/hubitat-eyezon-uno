@@ -29,6 +29,7 @@ class MockSocket {
 
 class MockDevice {
     Map vals
+    String id = "dev-1"
     String deviceNetworkId = "uno-device"
     MockDevice(Map v) { vals = v }
     def currentValue(String n) { vals[n] }
@@ -102,6 +103,16 @@ class AppEnv {
     List deleted = []
 }
 
+// A notification device (capability.notification).
+class MockNotifier {
+    List messages = []
+    boolean fail = false
+    void deviceNotification(String text) {
+        if (fail) throw new IllegalStateException("notifier down")
+        messages << text
+    }
+}
+
 abstract class HubBase extends Script {
     Map state = [:]
     Map settings = [:]
@@ -115,7 +126,7 @@ abstract class HubBase extends Script {
     Map currentVals = [:]
     long nowMs = 1_000_000L
     def parent = null
-    Map location = [timeZone: TimeZone.getDefault()]
+    Map location = [timeZone: TimeZone.getDefault(), temperatureScale: "C"]
     MockLog log
     MockSocket socket
     def interfaces
@@ -130,6 +141,24 @@ abstract class HubBase extends Script {
     }
 
     long now() { nowMs }
+
+    // Groovy 2.4's Script.setProperty/getProperty use the binding even for declared fields,
+    // so route real properties straight to the field to behave the same on every version.
+    void setProperty(String name, Object value) {
+        def mp = getMetaClass().hasProperty(this, name)
+        if (mp != null && name != "binding" && name != "metaClass") mp.setProperty(this, value) else super.setProperty(name, value)
+    }
+    Object getProperty(String name) {
+        def mp = getMetaClass().hasProperty(this, name)
+        return (mp != null && name != "binding" && name != "metaClass") ? mp.getProperty(this) : super.getProperty(name)
+    }
+
+    // Hubitat converts to the hub's temperature scale; a hub set to Fahrenheit gets Fahrenheit.
+    def convertTemperatureIfNeeded(def value, String scale, Integer precision) {
+        BigDecimal v = value as BigDecimal
+        if (location.temperatureScale == "F" && scale == "C") v = v * 9 / 5 + 32
+        return v.setScale(precision, java.math.RoundingMode.HALF_UP)
+    }
     void sendEvent(Map e) { events << e; currentVals[e.name] = e.value }
     void sendLocationEvent(Map e) { locationEvents << e }
     void runIn(Integer s, String h, Map o = null) { pending[h] = s; scheduleCalls << [h, s] }
@@ -148,7 +177,7 @@ abstract class HubBase extends Script {
     void metadata(Closure c) { c.delegate = this; c() }
     void definition(Map m, Closure c = null) { if (c) { c.delegate = this; c() } }
     void capability(String n) {}
-    void attribute(String n, String t) {}
+    void attribute(Object... a) {}
     void command(Object... a) {}
     void preferences(Closure c) { c.delegate = this; c() }
     void input(Map m) {}

@@ -5,17 +5,17 @@ EnvisaLink UNO TPI spec and exercise the app, so most behaviour can be checked w
 
 ## Running
 
-You need Java 11+ and Groovy 4 (`winget install --id Apache.Groovy.4 -e` on Windows).
+You need Java 8+ and Groovy 2.4 or later (`winget install --id Apache.Groovy.4 -e` on Windows). CI runs Groovy 4.0 and Groovy 2.4.21, the line Hubitat uses; see `.github/workflows/tests.yml`.
 
 ```powershell
 .\tests\run-tests.ps1            # Windows wrapper (finds Groovy for you)
 groovy tests/run.groovy          # any platform, from the repository root
 groovy tests/run.groovy -v       # also list every passing check
 groovy tests/run.groovy app conn # only case files whose name contains "app" or "conn"
+groovy tests/syntax-check.groovy # parse-only check of every app and driver
 ```
 
-The exit code is non-zero if anything fails. The same command runs in GitHub Actions
-(`.github/workflows/tests.yml`).
+The exit code is non-zero if anything fails.
 
 ## Layout
 
@@ -29,6 +29,7 @@ The exit code is non-zero if anything fails. The same command runs in GitHub Act
 | `cases/10_connection_session.groovy` | Login, reconnect, back-off, watchdog, frame robustness |
 | `cases/20_connection_frames.groovy` | Frames from the UNO: zones, partitions, trouble, bypass, CID, host info, chime |
 | `cases/25_connection_events.groovy` | Contact ID semantics: who armed or disarmed, alarm and trouble text, history, `unoEvent` |
+| `cases/27_connection_features.groovy` | In-memory codes, tamper, health, diagnostic/test-event settings, PGM, temperatures, notifications, `debugDump` |
 | `cases/30_connection_commands.groovy` | Commands to the UNO: queue and acks, arm, disarm, bypass, keypress, panic, REST sync |
 | `cases/40_child_drivers.groovy` | Partition and zone drivers |
 | `cases/50_app.groovy` | Device creation, hints, partitions, zone sets, forwarding, setup checks |
@@ -55,4 +56,4 @@ Useful helpers: `k.newConn(settings)`, `k.authed(settings)`, `k.feed(d, "%02,01.
 
 The mocks encode our reading of the Hubitat API. They can't prove things that depend on the real hub, such as
 the exact text of `socketStatus` messages, how the hub delivers raw-socket data, or the sandbox's restrictions.
-Hubitat also runs an older Groovy than the 4.x used here, so test on a hub before releasing.
+Hubitat runs Groovy 2.4, which the tests now cover, but its sandbox is stricter than a plain Groovy, so test on a hub before releasing.

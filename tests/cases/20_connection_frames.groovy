@@ -171,7 +171,7 @@ k.section("CID events (command 03)") {
 }
 
 k.section("Host information (command 05)") {
-    def d = k.authed()
+    def d = k.authed(diagnosticEvents: true)
     k.feed(d, "%05,001C2A45F894,UNO, 01.00.117 - BETA,1,20250923183203\$")
     k.check("model/mac/time", d.lastAttr("panelModel") == "UNO" && d.lastAttr("panelMac") == "001C2A45F894" && d.lastAttr("panelTime") == "20250923183203", d.currentVals)
     k.check("firmware string", d.lastAttr("firmwareVersion") == "01.00.117 - BETA", d.lastAttr("firmwareVersion"))

@@ -198,6 +198,115 @@ k.section("REST status and setup checks") {
             summary.contains("Connection: authenticated") && summary.contains("UNO, firmware 01.00.117, MAC 001C2A45F894") && summary.contains("REST: disabled"), summary)
 }
 
+k.section("PGM outputs") {
+    def (a, env) = k.newApp([zoneCount: 1, pgmSet: "1,3-4", pgmNames: "1:Garage Door\n# note\nbad\n4:Gate"])
+    a.initialize()
+    List pgms = env.children.keySet().findAll { it.startsWith("uno-pgm-") }.sort()
+    k.check("a PGM device for each output in the set", pgms == ["uno-pgm-1", "uno-pgm-3", "uno-pgm-4"], pgms)
+    k.check("created with the UNO PGM driver", env.children["uno-pgm-1"].typeName == "UNO PGM")
+    k.check("named from the hints, with a generic fallback", env.children["uno-pgm-1"].label == "Garage Door" && env.children["uno-pgm-3"].label == "PGM 3" && env.children["uno-pgm-4"].label == "Gate", pgms.collect { env.children[it].label })
+
+    a.settings.pgmNames = "3:Sprinklers"
+    a.updated()
+    k.check("renaming takes effect on update", env.children["uno-pgm-3"].label == "Sprinklers")
+
+    a.triggerPgm(3)
+    k.check("a trigger is forwarded to the connection device", env.children["uno-connection"].callArgs.last() == ["triggerPgm", [3]], env.children["uno-connection"].callArgs)
+    a.notifyPgmEvents(3, [[name: "lastTriggered", value: "now"]])
+    k.check("accepted triggers are recorded on the PGM device", env.children["uno-pgm-3"].last("lastTriggered") == "now")
+    a.notifyPgmEvents(9, [[name: "x", value: "y"]])
+    k.check("events for a PGM without a device are ignored", true)
+
+    def (b, envB) = k.newApp([zoneCount: 1])
+    b.initialize()
+    k.check("no PGM set => no PGM devices", envB.children.keySet().every { !it.startsWith("uno-pgm-") })
+    def (c, envC) = k.newApp([zoneCount: 1, pgmSet: "0,15,x"])
+    c.initialize()
+    k.check("invalid PGM numbers create nothing", envC.children.keySet().every { !it.startsWith("uno-pgm-") })
+}
+
+k.section("Online / offline health") {
+    def (a, env) = k.newApp([zoneCount: 2, partitionSet: "1-2", pgmSet: "1"])
+    a.initialize()
+    k.check("devices created before the connection is up start offline", env.children["uno-zone-1"].last("healthStatus") == "offline" && env.children["uno-partition-1"].last("healthStatus") == "offline" && env.children["uno-pgm-1"].last("healthStatus") == "offline")
+
+    a.notifyHealth("online")
+    def kids = env.children.keySet().findAll { it != "uno-connection" }.toList()
+    k.check("every child device is told when the connection comes online", kids.every { env.children[it].last("healthStatus") == "online" }, kids)
+    k.check("the connection device manages its own status", env.children["uno-connection"].last("healthStatus") == null)
+
+    a.settings.zoneCount = 4
+    a.updated()
+    k.check("a device created while online starts online", env.children["uno-zone-4"].last("healthStatus") == "online")
+
+    a.notifyHealth("offline")
+    k.check("and everything goes offline together", kids.every { env.children[it].last("healthStatus") == "offline" } && env.children["uno-zone-4"].last("healthStatus") == "offline")
+
+    a.settings.zoneHints = "1:Basement Leak:water"
+    a.notifyHealth("online")
+    a.updated()
+    k.check("a zone recreated with another driver gets the current status", env.children["uno-zone-1"].typeName == "UNO Zone Water" && env.children["uno-zone-1"].last("healthStatus") == "online")
+}
+
+k.section("Notifications") {
+    def (a, env) = k.newApp([zoneCount: 1])
+    a.initialize()
+    MockNotifier n1 = new MockNotifier(), n2 = new MockNotifier()
+
+    a.notifyEvent([category: "alarm", text: "Burglary alarm: Front Door (zone 5)", partition: 1, restore: false])
+    k.check("nothing is sent with no notification devices", n1.messages.isEmpty())
+
+    a.settings.notifyDevices = [n1, n2]
+    a.notifyEvent([category: "alarm", text: "Burglary alarm: Front Door (zone 5)", partition: 1, restore: false])
+    k.check("alarms notify every device by default", n1.messages == ["Burglary alarm: Front Door (zone 5)"] && n2.messages == n1.messages, n1.messages)
+    a.notifyEvent([category: "alarm", text: "Burglary alarm restored: Front Door (zone 5)", partition: 1, restore: true])
+    k.check("alarm restorals don't notify", n1.messages.size() == 1)
+    a.notifyEvent([category: "trouble", text: "AC power loss", partition: 1, restore: false])
+    a.notifyEvent([category: "trouble", text: "AC power loss restored", partition: 1, restore: true])
+    a.notifyEvent([category: "supervisory", text: "Pump failure", partition: 1, restore: false])
+    k.check("troubles, their restorals and supervisory events notify by default", n1.messages.takeRight(3) == ["AC power loss", "AC power loss restored", "Pump failure"], n1.messages)
+
+    a.notifyEvent([category: "arm", text: "Armed by Alice", partition: 1, restore: true])
+    a.notifyEvent([category: "disarm", text: "Disarmed by Alice", partition: 1, restore: false])
+    k.check("arm and disarm are off by default", n1.messages.size() == 4)
+    a.settings.notifyArmDisarm = true
+    a.notifyEvent([category: "arm", text: "Armed by Alice", partition: 1, restore: true])
+    a.notifyEvent([category: "disarm", text: "Disarmed by Alice", partition: 1, restore: false])
+    k.check("and notify once switched on", n1.messages.takeRight(2) == ["Armed by Alice", "Disarmed by Alice"], n1.messages)
+
+    int count = n1.messages.size()
+    ["test", "access", "exception", "bypass", "other"].each { c -> a.notifyEvent([category: c, text: "x", partition: 1, restore: false]) }
+    k.check("tests and other categories never notify", n1.messages.size() == count)
+
+    a.settings.notifyAlarms = false; a.settings.notifyTroubles = false
+    a.notifyEvent([category: "alarm", text: "Fire alarm", partition: 1, restore: false])
+    a.notifyEvent([category: "trouble", text: "AC power loss", partition: 1, restore: false])
+    k.check("alarms and troubles can be switched off", n1.messages.size() == count)
+
+    n1.fail = true
+    a.settings.notifyAlarms = true
+    a.notifyEvent([category: "alarm", text: "Fire alarm", partition: 1, restore: false])
+    k.check("a failing notification device is logged, not thrown", a.warns().any { it.contains("Could not send notification") }, a.warns())
+
+    def (m, envM) = k.newApp([zoneCount: 1, partitionSet: "1-2", partitionHints: "2:Guest House"])
+    m.initialize()
+    MockNotifier mn = new MockNotifier()
+    m.settings.notifyDevices = [mn]
+    m.notifyEvent([category: "alarm", text: "Fire alarm", partition: 2, restore: false])
+    m.notifyEvent([category: "alarm", text: "Fire alarm", partition: 1, restore: false])
+    k.check("with several partitions the message says which", mn.messages == ["Guest House: Fire alarm", "House Alarm: Fire alarm"], mn.messages)
+}
+
+k.section("Event settings are pushed to the connection device") {
+    def (a, env) = k.newApp([zoneCount: 1])
+    a.initialize()
+    List sent = env.children["uno-connection"].settingsUpdated
+    k.check("diagnostic and test events are off by default", sent.any { it[0] == "diagnosticEvents" && it[1].value == false } && sent.any { it[0] == "recordTestEvents" && it[1].value == false })
+    a.settings.diagnosticEvents = true; a.settings.recordTestEvents = true
+    a.updated()
+    k.check("switching them on is pushed", sent.any { it[0] == "diagnosticEvents" && it[1].value == true } && sent.any { it[0] == "recordTestEvents" && it[1].value == true })
+}
+
 k.section("User names and zone names for event text") {
     def (a, env) = k.newApp([zoneCount: 3, userNames: "2:Alice\n# comment\nbad line\n3 : Bob \n0:Nobody", zoneHints: "2:Front Door:contact"])
     a.initialize()
