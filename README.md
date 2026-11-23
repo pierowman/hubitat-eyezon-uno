@@ -30,7 +30,8 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Per-zone `lastFault` timestamp
 - Per-zone `tamper` attribute (`TamperAlert`), so a tamper never looks like a door opening
 - Per-zone `batteryStatus` (`ok`/`low`) and `supervision` (`ok`/`lost`) from the UNO's low-battery and lost-supervision events
-- Lists of the open and bypassed zones by name (`openZones`, `bypassedZones`) on the connection device, and per partition when you assign zones to partitions (or when there is only one partition)
+- Lists of the open and bypassed zones by name (`openZones`, `bypassedZones`) on the connection device, and per partition when you assign zones to partitions (or when there is only one partition). The open list also comes with a count and **when each zone opened**, as text for notifications and tiles and as JSON for rules
+- An option to keep a zone that was open when it was bypassed in the open list, for panels that report bypassed zones as closed
 - Per-zone `temperature` for wireless zones that report one, and inside/outside temperature on the partition
 - Fast location events for low-latency automations: `unoZoneEvent`
 - CID fast-path for zone alarm events, ahead of the next zone bitmap
@@ -43,7 +44,7 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Quiet hours (alarms always get through), a partition filter, repeat suppression for troubles, and an alert if the UNO connection is lost for too long
 
 **Status device (optional)**
-- A `UNO Status` device with `openZones`, `bypassedZones`, `troubleSummary` and `staleSensors`, for one dashboard tile. Optionally reports sensors with no activity for a number of days
+- A `UNO Status` device with `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary` and `staleSensors`, for one dashboard tile. Optionally reports sensors with no activity for a number of days
 
 **Monitoring and diagnostics**
 - Plain-language event descriptions from the UNO's Contact ID events: who armed or disarmed ("Armed by Alice"), which sensor alarmed, troubles and restorals
@@ -95,6 +96,7 @@ Device network IDs are fixed, so existing rules and dashboards keep working acro
 | Enable REST metadata and startup sync | Uses the UNO REST interface for labels and startup state |
 | Configured Zone Count | Zones `1..N` are created (default 27, max 128) |
 | Zone set | e.g. `1-8,12,20-27`. When filled in it **replaces** Zone Count |
+| Keep a bypassed zone in the open list | Off by default. See [Open zones](#open-zones) |
 | Default type for unknown zones | Used when a zone has no hint and its label doesn't suggest a type |
 | Zone Hints | One zone per line: `zoneNumber:Label:type` (`contact`, `motion`, `smoke`, `co`, `water`) |
 | User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
@@ -196,6 +198,23 @@ Options that shape what is sent:
 - **Repeat suppression**: the same trouble (a low battery that keeps reporting, say) is sent once in 6 hours. Its restoral is always sent and lets the next occurrence through. Alarms are never suppressed.
 - **Connection lost**: if the UNO connection is down for 5, 15, 30 or 60 minutes (default 5, or never), you get a message, and another when it is back. A recovery before then sends nothing. Because the app is what notifies you, an outage of the hub itself can't be reported.
 
+### Open zones
+
+The connection device (and the status device) keep a live list of the open zones, with when each one opened:
+
+| Attribute | Value |
+|---|---|
+| `openZones` | The names, e.g. `Front Door (zone 5), zone 7`, or `none` |
+| `openZoneCount` | How many are open |
+| `openZonesTimed` | Names with the time they opened, ready to use in a notification or tile: `Front Door (zone 5) since 10:42; zone 7 since 09:15`. A zone that has been open since another day shows the date too (`11-22 21:05`). A bypassed zone is marked `(bypassed)` |
+| `openZonesDetail` | The same as JSON for rules: `[{"zone":5,"name":"Front Door","since":"2026-11-23 10:42:11"}]`, with `"bypassed":true` where it applies. At most 25 entries; `openZoneCount` is always the true number |
+
+The time is when the integration saw the zone open. A zone that was already open when the integration started (or after a hub restart) is timed from when it was first seen. A zone that stays open across a reconnect keeps its time. The attributes only change when the list does, so they don't churn as time passes.
+
+**Keeping bypassed zones in the list.** Some panels (Honeywell and Ademco) report a bypassed zone as closed whatever it is really doing, so an open zone vanishes from the list the moment it is bypassed. Switch on **Keep a bypassed zone in the open list** and a zone that was open when it was bypassed stays listed, marked `(bypassed)` and with its original time, until the bypass is removed. A zone that was closed when it was bypassed is never added, and a zone whose bypass arrives up to 10 seconds after it closed is still counted as having been open. The option is off by default. The UNO reports bypass in its own bitmap, and its spec doesn't say whether a bypassed zone also reads closed in the zone bitmap, so I don't know that a UNO needs this; it is there for panels that do. The option changes only these lists, never the zone devices themselves.
+
+To bypass whatever is open before arming, use `armStayBypass` / `armAwayBypass`, or `bypassOpenZones` on its own.
+
 ### Status device
 
 Switch on **Create a UNO Status device** (it needs the `UNO Status` driver, which HPM lists as optional) for one device with `openZones`, `bypassedZones`, `troubleSummary` and `staleSensors`, handy for a dashboard tile. With a single partition and no zone assignments the partition device also gets `openZones` and `bypassedZones`. With [Zones per partition](#zones-per-partition) filled in, each partition gets its own list instead. With several partitions and no assignments the lists are panel-wide and stay on the status and connection devices.
@@ -235,9 +254,9 @@ Unrecognised or transitory panel states are reported as `busy`, as the TPI docum
 
 **PGM device**: `lastTriggered` and `healthStatus`.
 
-**Status device**: `openZones`, `bypassedZones`, `troubleSummary` (`none`, or the active troubles, labelled `P1: ...; P3: ...` when more than one partition has any), `staleSensors` and `healthStatus`.
+**Status device**: `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary` (`none`, or the active troubles, labelled `P1: ...; P3: ...` when more than one partition has any), `staleSensors` and `healthStatus`.
 
-**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastEventRaw`, `lastEventCode`, `lastEventQualifier`, `lastEventPartition`, `lastEventZone`, `lastEventUser`, `openZones`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
+**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastEventRaw`, `lastEventCode`, `lastEventQualifier`, `lastEventPartition`, `lastEventZone`, `lastEventUser`, `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
 
 `zoneTimers` is JSON from the last `dumpZoneTimers`: for each zone with a timer, `"open"` or the seconds since it closed, for example `{"1":"open","2":5,"4":327625}`. The UNO's timers tick every 5 seconds and forget a zone after about 3.8 days, so older zones are left out.
 

@@ -12,6 +12,8 @@ import java.util.concurrent.ConcurrentHashMap
 @Field static final ConcurrentHashMap CID_SEEN = new ConcurrentHashMap()     // "<device>:<zone>" -> time of the last fast-path event
 @Field static final ConcurrentHashMap HISTORY = new ConcurrentHashMap()      // device id -> recent events, newest first
 @Field static final ConcurrentHashMap PARTITION_SEEN = new ConcurrentHashMap() // "<device>:<partition>:<attribute>" -> last value sent
+@Field static final ConcurrentHashMap OPEN_SINCE = new ConcurrentHashMap()    // "<device>:<zone>" -> when it opened (or was first seen open)
+@Field static final ConcurrentHashMap LEFT_OPEN = new ConcurrentHashMap()      // "<device>:<zone>" -> [since, leftAt], for a zone that just closed
 
 metadata {
     definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess",
@@ -46,6 +48,9 @@ metadata {
         attribute "lastKeypadSound", "string"
         attribute "zoneTimers", "string"
         attribute "openZones", "string"
+        attribute "openZoneCount", "number"
+        attribute "openZonesTimed", "string"
+        attribute "openZonesDetail", "string"
         attribute "bypassedZones", "string"
         attribute "troubleSummary", "string"
         attribute "lastRawMessage", "string"
@@ -107,6 +112,7 @@ metadata {
         input name: "watchdogMinutes", type: "enum", title: "Reconnect if no frames seen for", options: ["3":"3 minutes", "5":"5 minutes", "10":"10 minutes"], defaultValue: "3", required: true
         input name: "commandTimeoutSeconds", type: "enum", title: "Wait for a command's reply for", options: ["2":"2 seconds", "4":"4 seconds", "10":"10 seconds", "20":"20 seconds"], defaultValue: "4", required: true
         input name: "partitionZones", type: "text", title: "Zones per partition (set by the app, e.g. 1:1-8;2:9-16)", required: false
+        input name: "holdBypassedOpenZones", type: "bool", title: "Keep a zone that was open when it was bypassed in the open list until the bypass is removed (for panels that report bypassed zones as closed)", defaultValue: false
     }
 }
 
@@ -1353,17 +1359,36 @@ private boolean zoneBit(String hex, Integer zone) {
     return ((Integer.parseInt(b, 16) >> ((zone - 1) % 8)) & 0x01) == 1
 }
 
-// Which zones are open and which are bypassed, by name, for dashboards and notifications.
+// Which zones are open and which are bypassed, by name, for dashboards and notifications. Each open zone also
+// carries the time it opened, as JSON for rules and as text for notifications and tiles.
 private void publishZoneSummary() {
     List<Integer> zones = configuredZones()
-    String open = zoneList(zones, state.lastZoneBitmap)
+    Map<Integer, Map> open = reconcileOpenZones(zones)
+    List<Integer> openZones = open.keySet().toList()
     String bypassed = zoneList(zones, state.lastBypassBitmap)
 
+    List<Map> detail = open.collect { Integer z, Map e ->
+        Map row = [zone: z, name: zoneNameOnly(z), since: formatTime(e.since as Long, true)]
+        if (e.held) row.bypassed = true
+        return row
+    }
+    String timed = open.collect { Integer z, Map e -> "${zoneLabel(z)} since ${formatTime(e.since as Long, false)}${e.held ? ' (bypassed)' : ''}".toString() }.join("; ")
+
+    Map values = [
+        openZones      : openZones ? openZones.collect { Integer z -> zoneLabel(z) }.join(", ") : "none",
+        openZoneCount  : openZones.size(),
+        openZonesTimed : timed ?: "none",
+        // A page of the list is plenty for a tile; the count above says if there are more.
+        openZonesDetail: JsonOutput.toJson(detail.take(25)),
+        bypassedZones  : bypassed
+    ]
+
     Map changed = [:]
-    if (device.currentValue("openZones") != open) changed.openZones = open
-    if (device.currentValue("bypassedZones") != bypassed) changed.bypassedZones = bypassed
+    values.each { String name, def value ->
+        if (device.currentValue(name)?.toString() != value.toString()) changed[name] = value
+    }
     if (changed) {
-        changed.each { String name, String value -> sendEvent(name: name, value: value) }
+        changed.each { String name, def value -> sendEvent(name: name, value: value) }
         try {
             parent?.notifyPanelSummary(changed)
         } catch (e) {
@@ -1371,15 +1396,71 @@ private void publishZoneSummary() {
         }
     }
 
-    publishPartitionZones()
+    publishPartitionZones(openZones as Set<Integer>)
+}
+
+// The zones to list as open, with when each opened. Normally that is what the zone bitmap says. With "keep
+// bypassed zones in the open list", a zone that was open when it was bypassed stays listed until the bypass is
+// removed, because some panels report a bypassed zone as closed whatever it is really doing.
+private Map<Integer, Map> reconcileOpenZones(List<Integer> zones) {
+    boolean hold = settings.holdBypassedOpenZones == true
+    String prefix = "${device.id}:".toString()
+    long t = now()
+    Map<Integer, Map> result = new TreeMap<Integer, Map>()
+
+    // A zone that closed a moment before its bypass arrived is still restored; older ones are forgotten.
+    LEFT_OPEN.keySet().findAll { String k -> k.startsWith(prefix) && (t - ((Map) LEFT_OPEN.get(k)).leftAt) > 60000L }.each { String k -> LEFT_OPEN.remove(k) }
+
+    zones.each { Integer z ->
+        boolean isOpen = state.lastZoneBitmap ? zoneBit(state.lastZoneBitmap, z) : false
+        boolean bypassed = state.lastBypassBitmap ? zoneBit(state.lastBypassBitmap, z) : false
+        String key = "${prefix}${z}".toString()
+        Long since = (Long) OPEN_SINCE.get(key)
+
+        if (isOpen) {
+            if (since == null) { since = t; OPEN_SINCE.put(key, since) }
+            LEFT_OPEN.remove(key)
+            result[z] = [since: since, held: bypassed]
+        } else if (hold && bypassed) {
+            Map left = (Map) LEFT_OPEN.get(key)
+            if (since == null && left != null && (t - (left.leftAt as Long)) <= 10000L) {
+                since = left.since as Long
+                OPEN_SINCE.put(key, since)
+            }
+            LEFT_OPEN.remove(key)
+            if (since != null) result[z] = [since: since, held: true]
+        } else if (since != null) {
+            OPEN_SINCE.remove(key)
+            LEFT_OPEN.put(key, [since: since, leftAt: t])
+        }
+    }
+    return result
+}
+
+private String zoneNameOnly(Integer zone) {
+    try {
+        return parent?.zoneName(zone) ?: "zone ${zone}".toString()
+    } catch (ignored) {
+        return "zone ${zone}".toString()
+    }
+}
+
+// Full date and time for rules; for people just the time when it was today, otherwise the date as well.
+private String formatTime(Long ms, boolean full) {
+    Date d = new Date(ms)
+    if (full) return d.format("yyyy-MM-dd HH:mm:ss", location.timeZone)
+    boolean today = d.format("yyyy-MM-dd", location.timeZone) == new Date(now()).format("yyyy-MM-dd", location.timeZone)
+    return d.format(today ? "HH:mm" : "MM-dd HH:mm", location.timeZone)
 }
 
 // With zones assigned to partitions, each partition device gets the lists for its own zones only.
 // What was last sent is remembered in memory so an unchanged list isn't sent again.
-private void publishPartitionZones() {
+private void publishPartitionZones(Set<Integer> openSet) {
     partitionZoneMap().each { Integer partition, List<Integer> mine ->
         List events = []
-        [openZones: zoneList(mine, state.lastZoneBitmap), bypassedZones: zoneList(mine, state.lastBypassBitmap)].each { String name, String value ->
+        List<Integer> mineOpen = mine.findAll { Integer z -> openSet.contains(z) }
+        String openText = mineOpen ? mineOpen.collect { Integer z -> zoneLabel(z) }.join(", ") : "none"
+        [openZones: openText, bypassedZones: zoneList(mine, state.lastBypassBitmap)].each { String name, String value ->
             String key = "${device.id}:${partition}:${name}".toString()
             if (PARTITION_SEEN.get(key) != value) {
                 PARTITION_SEEN.put(key, value)

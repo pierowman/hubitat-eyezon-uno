@@ -73,6 +73,10 @@ def mainPage() {
                 submitOnChange: true,
                 required: false
             paragraph rangePreview(settings.zoneSet, 1, 128, "zone", "zones 1-${safeInt(settings.zoneCount, 27)} (from Zone Count)")
+            input "holdBypassedOpenZones", "bool",
+                title: "Keep a bypassed zone in the open list if it was open when it was bypassed",
+                description: "Off by default. Some panels (Honeywell and Ademco) report a bypassed zone as closed whatever it is doing. With this on, a zone that was open when it was bypassed stays in the open zone list, marked (bypassed), until the bypass is removed.",
+                defaultValue: false
             input "autoCreateConfiguredZones", "bool", title: "Pre-create the configured zones at install", defaultValue: true
             input "defaultUnknownZoneType", "enum",
                 title: "Default type for unknown zones",
@@ -249,8 +253,8 @@ def initialize() {
     if (restart) {
         state.startedVersion = appVersion()
         runIn(1, "initializeConnection")
-    } else if (((state.deviceChurn ?: 0) as Integer) > 0 || changed.contains("partitionZones")) {
-        // New devices (and new zone assignments) start knowing nothing, so have the panel announce everything again.
+    } else if (((state.deviceChurn ?: 0) as Integer) > 0 || changed.contains("partitionZones") || changed.contains("holdBypassedOpenZones")) {
+        // New devices (and new zone assignments, or a changed open-list rule) start knowing nothing, so have the panel announce everything again.
         runIn(1, "resyncConnection")
     }
     state.deviceChurn = 0
@@ -402,7 +406,8 @@ private List<String> applyConnectionSettings() {
         keepaliveSeconds: [(settings.keepaliveSeconds ?: keepaliveDefault()).toString(), "enum"],
         watchdogMinutes : [(settings.watchdogMinutes ?: "3").toString(), "enum"],
         commandTimeoutSeconds: [(settings.commandTimeoutSeconds ?: "4").toString(), "enum"],
-        partitionZones  : [normalizedPartitionZones(), "text"]
+        partitionZones  : [normalizedPartitionZones(), "text"],
+        holdBypassedOpenZones: [settings.holdBypassedOpenZones == true, "bool"]
     ]
 
     Map pushed = (state.pushedSettings instanceof Map) ? state.pushedSettings : [:]
@@ -586,7 +591,7 @@ private void applyPanelSummary(def dev) {
     boolean isStatus = dev.deviceNetworkId == "uno-status"
     if (!isStatus && (configuredPartitions().size() != 1 || hasPartitionZones())) return
 
-    (isStatus ? ["openZones", "bypassedZones", "troubleSummary"] : ["openZones", "bypassedZones"]).each { String n ->
+    (isStatus ? ["openZones", "openZoneCount", "openZonesTimed", "openZonesDetail", "bypassedZones", "troubleSummary"] : ["openZones", "bypassedZones"]).each { String n ->
         def v = conn.currentValue(n)
         if (v != null) dev.sendEvent(name: n, value: v)
     }

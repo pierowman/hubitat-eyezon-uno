@@ -7,8 +7,8 @@ k.section("Saving only restarts the connection when it has to") {
     def (a, env) = k.newApp([zoneCount: 3])
     a.initialize()
     def conn = env.children["uno-connection"]
-    k.check("the first save pushes every setting and starts the connection", conn.settingsUpdated.size() == 18 && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated.size(), a.pending])
-    k.check("the password is never copied into the app's state", a.state.pushedSettings.size() == 18 && a.state.pushedSettings.values().every { !it.contains("pw") }, a.state.pushedSettings)
+    k.check("the first save pushes every setting and starts the connection", conn.settingsUpdated.size() == 19 && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated.size(), a.pending])
+    k.check("the password is never copied into the app's state", a.state.pushedSettings.size() == 19 && a.state.pushedSettings.values().every { !it.contains("pw") }, a.state.pushedSettings)
 
     a.pending.clear(); conn.settingsUpdated.clear()
     a.updated()
@@ -52,7 +52,7 @@ k.section("Saving only restarts the connection when it has to") {
     a.pending.clear()
     a.updated()
     def fresh = env.children["uno-connection"]
-    k.check("a recreated connection device gets every setting again", fresh.settingsUpdated.size() == 18 && a.pending.containsKey("initializeConnection"), fresh.settingsUpdated.size())
+    k.check("a recreated connection device gets every setting again", fresh.settingsUpdated.size() == 19 && a.pending.containsKey("initializeConnection"), fresh.settingsUpdated.size())
 }
 
 k.section("Status device and panel summary") {

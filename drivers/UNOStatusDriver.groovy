@@ -5,6 +5,9 @@ metadata {
         capability "HealthCheck"
 
         attribute "openZones", "string"
+        attribute "openZoneCount", "number"
+        attribute "openZonesTimed", "string"
+        attribute "openZonesDetail", "string"
         attribute "bypassedZones", "string"
         attribute "troubleSummary", "string"
         attribute "staleSensors", "string"
@@ -14,6 +17,9 @@ metadata {
 
 def installed() {
     sendEvent(name: "openZones", value: "none")
+    sendEvent(name: "openZoneCount", value: 0)
+    sendEvent(name: "openZonesTimed", value: "none")
+    sendEvent(name: "openZonesDetail", value: "[]")
     sendEvent(name: "bypassedZones", value: "none")
     sendEvent(name: "troubleSummary", value: "none")
     sendEvent(name: "staleSensors", value: "none")

@@ -45,7 +45,7 @@ k.section("Open and bypassed zones") {
 
     k.feed(d, "%01," + bitmap([5, 7]) + "\$")
     k.check("open zones are listed by name", d.lastAttr("openZones") == "Front Door (zone 5), zone 7", d.lastAttr("openZones"))
-    k.check("and forwarded to the app", d.parent.callArgs.contains(["notifyPanelSummary", [[openZones: "Front Door (zone 5), zone 7"]]]), d.parent.callArgs.findAll { it[0] == "notifyPanelSummary" })
+    k.check("and forwarded to the app", d.parent.callArgs.any { it[0] == "notifyPanelSummary" && it[1][0].openZones == "Front Door (zone 5), zone 7" }, d.parent.callArgs.findAll { it[0] == "notifyPanelSummary" })
 
     int calls = d.parent.callArgs.count { it[0] == "notifyPanelSummary" }
     k.feed(d, "%01," + bitmap([5, 7]) + "\$")

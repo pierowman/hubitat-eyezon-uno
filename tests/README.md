@@ -44,6 +44,7 @@ The exit code is non-zero if anything fails.
 | `cases/77_state_stability.groovy` | Arming, entry delay and alarm states don't flap while a standing trouble and other frames keep arriving (regression guard for envisalink_new #255) |
 | `cases/78_connection_recovery.groovy` | Recovery never gets stuck: failed connects, closes and sends of any kind, backoff growth and flapping, fused and split messages, mismatched acknowledgements, login timeouts (regression guard for envisalink_new #237/#238) |
 | `cases/80_arming_mode.groovy` | The mode shown during an exit delay is what was requested, never the previous arm's (regression guard for envisalink_new #191) |
+| `cases/81_open_zones.groovy` | Open zones with when each opened, and keeping a bypassed zone in the list |
 | `cases/79_corrupted_bytes.groovy` | Garbled bytes in every frame type never throw, disconnect or become bogus events, acknowledgements or panel details (regression guard for envisalink_new #234) |
 
 ## Writing a test
