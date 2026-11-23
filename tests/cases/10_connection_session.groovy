@@ -100,13 +100,13 @@ k.section("Exponential reconnect back-off") {
 k.section("Watchdog") {
     def a = k.authed()
     a.nowMs += 4 * 60 * 1000L
-    a.state.lastFrameTs = a.nowMs - 4 * 60 * 1000L
+    a.noteFrame(a.nowMs - 4 * 60 * 1000L)
     int before = a.socket.connects.size()
     a.watchdogCheck()
     k.check("reconnects after 4 min silence (threshold 3)", a.socket.connects.size() == before + 1)
 
     def b = k.authed(heartbeatMinutes: "10", watchdogMinutes: "3")
-    b.state.lastFrameTs = b.nowMs - 4 * 60 * 1000L
+    b.noteFrame(b.nowMs - 4 * 60 * 1000L)
     int beforeB = b.socket.connects.size()
     b.watchdogCheck()
     k.check("threshold never shorter than heartbeat+1", b.socket.connects.size() == beforeB)

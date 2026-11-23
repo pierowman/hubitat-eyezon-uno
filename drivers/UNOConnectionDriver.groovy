@@ -12,6 +12,9 @@ import java.util.concurrent.ConcurrentHashMap
 @Field static final ConcurrentHashMap CID_SEEN = new ConcurrentHashMap()     // "<device>:<zone>" -> time of the last fast-path event
 @Field static final ConcurrentHashMap HISTORY = new ConcurrentHashMap()      // device id -> recent events, newest first
 @Field static final ConcurrentHashMap PARTITION_SEEN = new ConcurrentHashMap() // "<device>:<partition>:<attribute>" -> last value sent
+@Field static final ConcurrentHashMap TEMP_SEEN = new ConcurrentHashMap()      // "<device>:z<zone>" / "<device>:p<n>-inside" -> last temperature byte
+@Field static final ConcurrentHashMap NAME_CACHE = new ConcurrentHashMap()     // "<device>:<zone>" -> [name, at], for the open zone lists
+@Field static final ConcurrentHashMap FRAME_AT = new ConcurrentHashMap()       // device id -> time of the last data from the panel
 @Field static final ConcurrentHashMap OPEN_SINCE = new ConcurrentHashMap()    // "<device>:<zone>" -> when it opened (or was first seen open)
 @Field static final ConcurrentHashMap LEFT_OPEN = new ConcurrentHashMap()      // "<device>:<zone>" -> [since, leftAt], for a zone that just closed
 
@@ -42,6 +45,7 @@ metadata {
         attribute "lastChime", "string"
         attribute "panelModel", "string"
         attribute "firmwareVersion", "string"
+        attribute "firmwareWarning", "string"
         attribute "panelTime", "string"
         attribute "panelMac", "string"
         attribute "lastAck", "string"
@@ -141,17 +145,14 @@ def initialize() {
     state.partitionStatus = [:]
     state.armRequests = [:]
     state.troubleBytes = [:]
-    state.zoneTemps = [:]
-    state.partitionTemps = [:]
     state.lastBypassBitmap = null
     state.lastTroubleBitmap = null
     state.loggedIn = false
     state.loginSent = false
-    state.lastFrameTs = 0L
     state.lastCidEvent = ""
-    // Earlier versions kept these in state.
-    state.remove("lastCidByZone")
-    state.remove("eventHistory")
+    // Earlier versions kept these in state; they are in memory now (they change constantly or can be rebuilt).
+    ["lastCidByZone", "eventHistory", "zoneTemps", "partitionTemps", "lastFrameTs"].each { String old -> state.remove(old) }
+    FRAME_AT.remove("${device.id}".toString())
     clearSeen()
     state.restStartupDone = false
     state.authFailed = false
@@ -205,8 +206,19 @@ def minuteCheck() {
 // Forgets what was last reported for this device, so everything is sent again.
 private void clearSeen() {
     String prefix = "${device.id}:".toString()
-    CID_SEEN.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> CID_SEEN.remove(k) }
-    PARTITION_SEEN.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> PARTITION_SEEN.remove(k) }
+    [CID_SEEN, PARTITION_SEEN, TEMP_SEEN, NAME_CACHE].each { ConcurrentHashMap m ->
+        m.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> m.remove(k) }
+    }
+}
+
+// The time of the last data from the panel, for the watchdog. It changes with every frame, so it is kept in
+// memory: after a hub restart it is empty and the watchdog simply waits for the next frame.
+private void noteFrame(Long at = null) {
+    FRAME_AT.put("${device.id}".toString(), at ?: now())
+}
+
+private long lastFrameAt() {
+    return (FRAME_AT.get("${device.id}".toString()) ?: 0L) as long
 }
 
 def reconnect() {
@@ -367,8 +379,6 @@ def resyncStates() {
     state.lastBypassBitmap = null
     state.lastTroubleBitmap = null
     state.troubleBytes = [:]
-    state.zoneTemps = [:]
-    state.partitionTemps = [:]
     clearSeen()
     refreshAll()
 }
@@ -550,7 +560,7 @@ def debugDump() {
     lines << "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, keepalive ${keepaliveSeconds()}s, watchdog ${settings.watchdogMinutes ?: '3'}m, command timeout ${commandTimeoutSeconds()}s"
     lines << "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})"
     lines << "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
-    lines << "timing: last frame ${secondsSince(state.lastFrameTs)}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s"
+    lines << "timing: last frame ${secondsSince(lastFrameAt())}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s"
     lines << "commands: ${queue.size()} queued (${queue*.name.join(', ') ?: 'none'}), in flight ${state.commandInFlight?.name ?: 'none'}, ${CODE_VAULT.size()} code(s) held in memory"
     lines << "partitions: ${state.partitionStatus ?: [:]}"
     lines << "troubles: ${state.troubleBytes ?: [:]}"
@@ -593,7 +603,7 @@ def watchdogCheck() {
         state.reconnectDelay = 2
     }
 
-    long lastTs = (state.lastFrameTs ?: 0L) as Long
+    long lastTs = lastFrameAt()
     if (lastTs == 0L) return
 
     // Never trip faster than a minute past the keepalive, or an idle panel would be reconnected needlessly.
@@ -933,7 +943,7 @@ def parse(String message) {
     String decoded = decodeIncoming(message)
     if (decoded == null) return
 
-    state.lastFrameTs = now()
+    noteFrame()
     if (settings.diagnosticEvents == true) {
         sendEvent(name: "lastHeartbeat", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
     }
@@ -1379,10 +1389,10 @@ private void publishZoneSummary() {
         if (e.held) row.bypassed = true
         return row
     }
-    String timed = open.collect { Integer z, Map e -> "${zoneLabel(z)} since ${formatTime(e.since as Long, false)}${e.held ? ' (bypassed)' : ''}".toString() }.join("; ")
+    String timed = open.collect { Integer z, Map e -> "${listLabel(z)} since ${formatTime(e.since as Long, false)}${e.held ? ' (bypassed)' : ''}".toString() }.join("; ")
 
     Map values = [
-        openZones      : openZones ? openZones.collect { Integer z -> zoneLabel(z) }.join(", ") : "none",
+        openZones      : openZones ? openZones.collect { Integer z -> listLabel(z) }.join(", ") : "none",
         openZoneCount  : openZones.size(),
         openZonesTimed : timed ?: "none",
         // A page of the list is plenty for a tile; the count above says if there are more.
@@ -1445,11 +1455,29 @@ private Map<Integer, Map> reconcileOpenZones(List<Integer> zones) {
 }
 
 private String zoneNameOnly(Integer zone) {
+    return cachedZoneName(zone) ?: "zone ${zone}".toString()
+}
+
+// The same zone appears in several lists on every change, and each name is a call to the app, so names used in
+// the lists are kept for a minute. (Event text looks names up afresh: events are rare and should be exact.)
+private String cachedZoneName(Integer zone) {
+    String key = "${device.id}:${zone}".toString()
+    long t = now()
+    Map hit = (Map) NAME_CACHE.get(key)
+    if (hit != null && (t - (hit.at as Long)) < 60000L) return hit.name as String
+
+    String name = null
     try {
-        return parent?.zoneName(zone) ?: "zone ${zone}".toString()
+        name = parent?.zoneName(zone)
     } catch (ignored) {
-        return "zone ${zone}".toString()
     }
+    NAME_CACHE.put(key, [name: name, at: t])
+    return name
+}
+
+private String listLabel(Integer zone) {
+    String name = cachedZoneName(zone)
+    return name ? "${name} (zone ${zone})".toString() : "zone ${zone}".toString()
 }
 
 // Full date and time for rules; for people just the time when it was today, otherwise the date as well.
@@ -1466,7 +1494,7 @@ private void publishPartitionZones(Set<Integer> openSet) {
     partitionZoneMap().each { Integer partition, List<Integer> mine ->
         List events = []
         List<Integer> mineOpen = mine.findAll { Integer z -> openSet.contains(z) }
-        String openText = mineOpen ? mineOpen.collect { Integer z -> zoneLabel(z) }.join(", ") : "none"
+        String openText = mineOpen ? mineOpen.collect { Integer z -> listLabel(z) }.join(", ") : "none"
         [openZones: openText, bypassedZones: zoneList(mine, state.lastBypassBitmap)].each { String name, String value ->
             String key = "${device.id}:${partition}:${name}".toString()
             if (PARTITION_SEEN.get(key) != value) {
@@ -1515,7 +1543,7 @@ private Map<Integer, List<Integer>> partitionZoneMap() {
 
 private String zoneList(List<Integer> zones, String bitmap) {
     if (!bitmap) return "none"
-    List<String> names = zones.findAll { Integer z -> zoneBit(bitmap, z) }.collect { Integer z -> zoneLabel(z) }
+    List<String> names = zones.findAll { Integer z -> zoneBit(bitmap, z) }.collect { Integer z -> listLabel(z) }
     return names ? names.join(", ") : "none"
 }
 
@@ -2034,8 +2062,46 @@ private void handlePanelInfo(List<String> parts) {
     if (model) sendEvent(name: "panelModel", value: model)
     if (fw) sendEvent(name: "firmwareVersion", value: fw)
     if (panelTime && settings.diagnosticEvents == true) sendEvent(name: "panelTime", value: panelTime)
+    checkFirmware(model, fw)
 
     logDebug("Panel info: model=${model}, fw=${fw}, partition=${defaultPartition}, mac=${mac}, time=${panelTime}")
+}
+
+// The oldest firmware the TPI document (v1.08) lists for each product. Older firmware may lack commands or frames.
+@Field static final Map MIN_FIRMWARE = [UNO: [1, 0, 154], SOLO: [1, 0, 146], EVL4MAX: [1, 0, 220], DUO: [1, 0, 104]]
+
+// Reads the first x.y.z in a version string (so "1.0.154", "01.00.154A" and "v1.0.154-beta" all work).
+private List<Integer> parseFirmware(String text) {
+    def m = (text ?: "") =~ /(\d+)\.(\d+)\.(\d+)/
+    if (!m.find()) return null
+    try {
+        return [Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3))]
+    } catch (ignored) {
+        return null
+    }
+}
+
+// Returns a warning when the panel is a known product running firmware older than the document's minimum, otherwise
+// "none". A model or version it can't recognise gets no warning: guessing would only cry wolf.
+private String firmwareWarning(String model, String fw) {
+    List<Integer> have = parseFirmware(fw)
+    String upper = (model ?: "").toUpperCase()
+    String product = MIN_FIRMWARE.keySet().find { String p -> upper.contains(p) }
+    if (!have || !product) return "none"
+
+    List<Integer> need = MIN_FIRMWARE[product] as List<Integer>
+    for (int i = 0; i < 3; i++) {
+        if (have[i] > need[i]) return "none"
+        if (have[i] < need[i]) return "Firmware ${have.join('.')} is older than ${need.join('.')}, the minimum the TPI document lists for ${product}. Some commands or frames may not work".toString()
+    }
+    return "none"
+}
+
+private void checkFirmware(String model, String fw) {
+    String warning = firmwareWarning(model ?: device.currentValue("panelModel"), fw ?: device.currentValue("firmwareVersion"))
+    if (device.currentValue("firmwareWarning") == warning) return
+    sendEvent(name: "firmwareWarning", value: warning)
+    if (warning != "none") logWarn(warning)
 }
 
 // Spec section 3.5: BIT 1..8 map to the low..high bit of each partition's trouble byte.
@@ -2163,14 +2229,14 @@ private void handleZoneTemperatures(List<String> parts) {
         return
     }
 
-    state.zoneTemps = state.zoneTemps ?: [:]
     for (Integer zone : configuredZones()) {
         int idx = (zone - 1) * 2
         if (idx + 2 > payload.length()) break
 
         String byteHex = payload.substring(idx, idx + 2)
-        if (byteHex == "00" || byteHex == state.zoneTemps["${zone}"]) continue
-        state.zoneTemps["${zone}"] = byteHex
+        String seenKey = "${device.id}:z${zone}".toString()
+        if (byteHex == "00" || byteHex == TEMP_SEEN.get(seenKey)) continue
+        TEMP_SEEN.put(seenKey, byteHex)
 
         def child = findZoneChild("uno-zone-${zone}")
         if (!child) continue
@@ -2192,7 +2258,6 @@ private void handlePartitionTemperatures(List<String> parts) {
         return
     }
 
-    state.partitionTemps = state.partitionTemps ?: [:]
     for (int idx = 0; idx < 8 && (idx * 2 + 2) <= payload.length(); idx++) {
         Integer partition = idx + 1
         List events = []
@@ -2200,9 +2265,9 @@ private void handlePartitionTemperatures(List<String> parts) {
         [[kind: "inside", attr: "temperature", offset: idx * 2], [kind: "outside", attr: "outsideTemperature", offset: (8 + idx) * 2]].each { Map t ->
             if (t.offset + 2 > payload.length()) return
             String byteHex = payload.substring(t.offset as int, (t.offset as int) + 2)
-            String key = "${partition}-${t.kind}".toString()
-            if (byteHex == "00" || byteHex == state.partitionTemps[key]) return
-            state.partitionTemps[key] = byteHex
+            String seenKey = "${device.id}:p${partition}-${t.kind}".toString()
+            if (byteHex == "00" || byteHex == TEMP_SEEN.get(seenKey)) return
+            TEMP_SEEN.put(seenKey, byteHex)
             events << temperatureEvent(t.attr as String, envisacorToCelsius(byteHex))
         }
 

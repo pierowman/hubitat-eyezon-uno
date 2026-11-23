@@ -31,3 +31,30 @@ jobs:
         run: groovy tests/syntax-check.groovy
       - name: Run tests
         run: groovy tests/run.groovy
+
+  lint:
+    name: lint and spelling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: wtfjoke/setup-groovy@v3
+        with:
+          groovy-version: "4.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # CodeNarc is downloaded on first use; keep it between runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.groovy/grapes
+          key: grapes-${{ hashFiles('tests/lint.groovy') }}
+      - name: Spelling
+        run: |
+          pip install codespell
+          codespell README.md INSTALL.md docs tests apps drivers packageManifest.json .github
+      - name: CodeNarc
+        run: groovy tests/lint.groovy

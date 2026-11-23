@@ -17,6 +17,20 @@ groovy tests/syntax-check.groovy # parse-only check of every app and driver
 
 The exit code is non-zero if anything fails.
 
+## Lint and spelling
+
+Two checks run in CI alongside the tests (the `lint` job in `.github/workflows/tests.yml`). Both are also easy to run locally.
+
+```powershell
+groovy tests/lint.groovy                       # CodeNarc over apps/ and drivers/ (needs Groovy 4 and Java 11+; downloads CodeNarc the first time)
+pip install codespell; codespell README.md INSTALL.md docs tests apps drivers packageManifest.json .github
+```
+
+- **CodeNarc** uses the rules in `tests/codenarc.groovy`. They are chosen for real mistakes (unused private methods, variables and imports, `println`, insecure `Random`, risky APIs) and not for style, and every one passes today, so a new violation is a regression. The file explains the few exemptions: the partition driver's capability stubs, and the broad `catch` blocks that are deliberate (one bad frame must not stop the rest). To see what another rule family would say, pass your own ruleset file: `groovy tests/lint.groovy my-rules.groovy`. The runner also fails if it checks fewer files than exist, so it can't pass by matching nothing.
+- **codespell** reads `.codespellrc` and needs no ignore list.
+
+CodeNarc can't run on Groovy 2.4, so it is a Groovy 4 job. The 2.4 parse check and test run stay in the `test` job.
+
 ## Layout
 
 | Path | Purpose |
@@ -45,6 +59,7 @@ The exit code is non-zero if anything fails.
 | `cases/78_connection_recovery.groovy` | Recovery never gets stuck: failed connects, closes and sends of any kind, backoff growth and flapping, fused and split messages, mismatched acknowledgements, login timeouts (regression guard for envisalink_new #237/#238) |
 | `cases/80_arming_mode.groovy` | The mode shown during an exit delay is what was requested, never the previous arm's (regression guard for envisalink_new #191) |
 | `cases/81_open_zones.groovy` | Open zones with when each opened, and keeping a bypassed zone in the list |
+| `cases/82_housekeeping.groovy` | Values kept out of hub state, zone names cached for the open lists, the firmware warning |
 | `cases/79_corrupted_bytes.groovy` | Garbled bytes in every frame type never throw, disconnect or become bogus events, acknowledgements or panel details (regression guard for envisalink_new #234) |
 
 ## Writing a test

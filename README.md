@@ -258,7 +258,7 @@ Unrecognised or transitory panel states are reported as `busy`, as the TPI docum
 
 **Status device**: `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary` (`none`, or the active troubles, labelled `P1: ...; P3: ...` when more than one partition has any), `staleSensors` and `healthStatus`.
 
-**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastEventRaw`, `lastEventCode`, `lastEventQualifier`, `lastEventPartition`, `lastEventZone`, `lastEventUser`, `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
+**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `firmwareWarning` (`none`, or a message when the firmware is older than the minimum the TPI document lists for the product, also shown in the app's Status section), `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastEventRaw`, `lastEventCode`, `lastEventQualifier`, `lastEventPartition`, `lastEventZone`, `lastEventUser`, `openZones`, `openZoneCount`, `openZonesTimed`, `openZonesDetail`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
 
 `zoneTimers` is JSON from the last `dumpZoneTimers`: for each zone with a timer, `"open"` or the seconds since it closed, for example `{"1":"open","2":5,"4":327625}`. The UNO's timers tick every 5 seconds and forget a zone after about 3.8 days, so older zones are left out.
 
@@ -408,6 +408,6 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 .\tests\run-tests.ps1     # or: groovy tests/run.groovy
 ```
 
-CI runs the tests on Groovy 4.0 and on Groovy 2.4.21, the line Hubitat uses, and checks that every file parses on both.
+CI runs the tests on Groovy 4.0 and on Groovy 2.4.21, the line Hubitat uses, and checks that every file parses on both. A separate job runs [CodeNarc](https://codenarc.org) over the apps and drivers (unused code, unused imports, risky APIs, `println`) and a spell check over the code and docs; both can be run locally, see [tests/README.md](tests/README.md).
 
 The tests load the real driver and app scripts with a mock Hubitat runtime, replay the spec's own examples and check the exact bytes of every command. See [tests/README.md](tests/README.md). They can't replace testing on a real hub.

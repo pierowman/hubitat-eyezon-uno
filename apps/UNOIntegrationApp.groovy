@@ -1167,6 +1167,8 @@ private String statusSummary() {
     }
 
     lines << "REST: ${state.restStatus ?: 'not checked yet'}"
+    String firmwareWarning = conn.currentValue("firmwareWarning")
+    if (firmwareWarning && firmwareWarning != "none") lines << "WARNING: ${firmwareWarning}"
     if (settings.requireCodeToArm == true) {
         lines << (settings.masterCode ? "Arming requires the master code" : "WARNING: arming requires a code but no master code is set, so arming is blocked")
     }

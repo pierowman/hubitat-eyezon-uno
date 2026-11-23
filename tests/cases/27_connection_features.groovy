@@ -73,7 +73,7 @@ k.section("Diagnostic events are opt-in") {
     k.check("no heartbeat, raw message or panel time events by default",
             d.lastAttr("lastHeartbeat") == null && d.lastAttr("lastRawMessage") == null && d.lastAttr("panelTime") == null, d.currentVals)
     k.check("the useful panel details are still published", d.lastAttr("panelModel") == "UNO" && d.lastAttr("firmwareVersion") == "01.00.117")
-    k.check("the watchdog still sees every frame", d.state.lastFrameTs > 0)
+    k.check("the watchdog still sees every frame", d.lastFrameAt() > 0)
 
     def o = k.authed(diagnosticEvents: true)
     k.feed(o, "%02,0100000000000000\$")
