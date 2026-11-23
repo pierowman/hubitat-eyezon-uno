@@ -83,12 +83,12 @@ k.section("Diagnostic events are opt-in") {
 k.section("Test reports are hidden unless asked for") {
     def d = k.authed()
     k.feed(d, "%03,1602010000\$")
-    k.check("a periodic test is not recorded or published", d.lastAttr("lastEvent") == null && d.state.eventHistory == null && d.locationEvents.isEmpty() && d.parent.callArgs.every { it[0] != "notifyEvent" }, d.currentVals)
+    k.check("a periodic test is not recorded or published", d.lastAttr("lastEvent") == null && d.historyList().isEmpty() && d.locationEvents.isEmpty() && d.parent.callArgs.every { it[0] != "notifyEvent" }, d.currentVals)
     k.check("but the raw summary still shows it", d.lastAttr("lastCidEvent") == "CID q=1 code=602 partition=1 zoneOrUser=0")
 
     def o = k.authed(recordTestEvents: true)
     k.feed(o, "%03,1602010000\$")
-    k.check("turned on, it is recorded", o.lastAttr("lastEvent") == "Periodic test" && o.lastAttr("lastEventType") == "test" && o.state.eventHistory.size() == 1, o.currentVals)
+    k.check("turned on, it is recorded", o.lastAttr("lastEvent") == "Periodic test" && o.lastAttr("lastEventType") == "test" && o.historyList().size() == 1, o.currentVals)
 }
 
 k.section("PGM outputs (command 0A)") {
@@ -196,7 +196,7 @@ k.section("Debug dump") {
     d.logs.clear()
     d.debugDump()
     String dump = d.logs.findAll { it.lvl == "info" }*.msg.join("\n")
-    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.2.0") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
+    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.3.0") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
     k.check("it shows the queue by name", dump.contains("in flight disarm") && dump.contains("1 queued (armStay)"), dump)
     k.check("and the recent events", dump.contains("Armed by user 2"), dump)
     k.check("it says whether secrets are set without showing them", dump.contains("password set") && dump.contains("master code set"), dump)

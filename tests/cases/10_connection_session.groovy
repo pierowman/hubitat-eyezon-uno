@@ -5,8 +5,8 @@ k.section("Login handshake") {
     d.initialize()
     k.check("initialize opens socket to 1.2.3.4:4025", d.socket.connects == [["1.2.3.4", 4025]])
     k.check("state is connecting", d.lastAttr("connectionState") == "connecting")
-    k.check("heartbeat + watchdog scheduled",
-            d.scheduleCalls.any { it[0] == "heartbeatCheck" } && d.scheduleCalls.any { it[0] == "watchdogCheck" }, d.scheduleCalls)
+    k.check("one minute schedule drives the heartbeat and watchdog",
+            d.scheduleCalls.any { it[0] == "minuteCheck" }, d.scheduleCalls)
 
     d.parse(k.hex("Login:"))
     k.check("password sent followed by CR in a single message", d.sent == ["pw\r"], d.sent)

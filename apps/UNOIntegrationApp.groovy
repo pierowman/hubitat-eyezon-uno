@@ -119,6 +119,18 @@ Examples:
                 required: false
         }
 
+        section("Status device and stale sensors (optional)") {
+            input "createStatusDevice", "bool",
+                title: "Create a UNO Status device",
+                description: "One device showing which zones are open or bypassed, the troubles, and stale sensors, for dashboard tiles. Needs the UNO Status driver.",
+                defaultValue: false
+            input "staleSensorDays", "number",
+                title: "Report sensors with no activity for this many days (0 = off)",
+                description: "A zone that has never opened or triggered in that time may have a dead sensor. Shown on the status device and sent as a notification when it changes.",
+                defaultValue: 0,
+                required: false
+        }
+
         section("Notifications (optional)") {
             input "notifyDevices", "capability.notification",
                 title: "Send notifications to",
@@ -127,6 +139,17 @@ Examples:
             input "notifyAlarms", "bool", title: "Alarms (burglary, fire, panic, CO, water and so on)", defaultValue: true
             input "notifyTroubles", "bool", title: "Troubles and their restorals (AC loss, low battery, tamper)", defaultValue: true
             input "notifyArmDisarm", "bool", title: "Armed and disarmed, and by whom", defaultValue: false
+            input "notifyPartitions", "text",
+                title: "Only for these partitions (e.g. 1 or 1,3; blank = all)",
+                required: false
+            input "quietStart", "time", title: "Quiet hours start (troubles and arm/disarm only)", required: false
+            input "quietEnd", "time", title: "Quiet hours end", required: false
+            paragraph "During quiet hours troubles and arm/disarm notices are skipped. Alarms are always sent. The same trouble is not repeated within 6 hours."
+            input "notifyOfflineMinutes", "enum",
+                title: "Tell me if the UNO connection is down for",
+                options: ["0": "Never", "5": "5 minutes", "15": "15 minutes", "30": "30 minutes", "60": "1 hour"],
+                defaultValue: "5",
+                required: false
         }
 
         section("Logging / Health") {
@@ -186,6 +209,7 @@ def initialize() {
 
     ensurePartitionDevices()
     ensurePgmDevices()
+    ensureStatusDevice()
 
     if (settings.autoCreateConfiguredZones != false) {
         configuredZones().each { Integer zoneNum ->
@@ -194,8 +218,33 @@ def initialize() {
     }
 
     reconcileExistingZones()
-    applyConnectionSettings()
-    runIn(1, "initializeConnection")
+    List<String> changed = applyConnectionSettings()
+    scheduleStaleCheck()
+
+    // Saving the app only restarts the connection when something it depends on changed (or the app was updated).
+    // Cosmetic changes such as names, hints and notification options leave it, and its command queue, alone.
+    boolean restart = changed.any { String n -> n in reconnectSettings() } || state.startedVersion != appVersion()
+    if (restart) {
+        state.startedVersion = appVersion()
+        runIn(1, "initializeConnection")
+    } else if (((state.deviceChurn ?: 0) as Integer) > 0) {
+        // New devices know nothing yet, so have the panel announce everything again without reconnecting.
+        runIn(1, "resyncConnection")
+    }
+    state.deviceChurn = 0
+}
+
+private String appVersion() {
+    return "1.3.0"
+}
+
+// The settings a running connection cannot pick up on its own.
+private List<String> reconnectSettings() {
+    return ["ip", "port", "password", "restUsername", "useRestMetadata", "zoneCount", "zoneSet", "heartbeatMinutes", "watchdogMinutes"]
+}
+
+private void noteDeviceCreated() {
+    state.deviceChurn = ((state.deviceChurn ?: 0) as Integer) + 1
 }
 
 def initializeConnection() {
@@ -203,6 +252,10 @@ def initializeConnection() {
     if (conn) {
         conn.initialize()
     }
+}
+
+def resyncConnection() {
+    getChildDevice("uno-connection")?.resyncStates()
 }
 
 private void ensureConnectionDevice() {
@@ -221,6 +274,8 @@ private void ensureConnectionDevice() {
             ]
         )
         logInfo("Created UNO Connection device")
+        // A new device has none of the settings that were pushed to the old one.
+        state.pushedSettings = [:]
     }
 }
 
@@ -248,6 +303,8 @@ private void ensurePartitionDevice(Integer partition) {
             ]
         )
         applyHealth(created)
+        applyPanelSummary(created)
+        noteDeviceCreated()
         logInfo("Created partition device: ${label}")
     } else {
         try {
@@ -272,6 +329,7 @@ private void ensurePgmDevices() {
         if (!dev) {
             def created = addChildDevice("uno", "UNO PGM", dni, [name: label, label: label, isComponent: true])
             applyHealth(created)
+            noteDeviceCreated()
             logInfo("Created PGM device: ${label}")
         } else {
             try {
@@ -298,26 +356,42 @@ private String partitionLabelFor(Integer partition) {
     return label
 }
 
-private void applyConnectionSettings() {
+// Pushes the app's settings to the connection device and returns the names of those that changed since last time.
+// Only a hash of each value is remembered, so the password is never copied into the app's state.
+private List<String> applyConnectionSettings() {
     def conn = getChildDevice("uno-connection")
-    if (!conn) return
+    if (!conn) return []
 
-    conn.updateSetting("ip", [value: settings.ip, type: "text"])
-    conn.updateSetting("port", [value: "${settings.port ?: 4025}", type: "number"])
-    conn.updateSetting("password", [value: settings.password, type: "text"])
-    conn.updateSetting("restUsername", [value: settings.restUsername ?: "user", type: "text"])
-    conn.updateSetting("masterCode", [value: settings.masterCode ?: "", type: "text"])
-    conn.updateSetting("zoneCount", [value: "${safeInt(settings.zoneCount, 27)}", type: "number"])
-    conn.updateSetting("zoneSet", [value: settings.zoneSet ?: "", type: "text"])
-    conn.updateSetting("enablePanic", [value: settings.enablePanic == true, type: "bool"])
-    conn.updateSetting("requireCodeToArm", [value: settings.requireCodeToArm == true, type: "bool"])
-    conn.updateSetting("diagnosticEvents", [value: settings.diagnosticEvents == true, type: "bool"])
-    conn.updateSetting("recordTestEvents", [value: settings.recordTestEvents == true, type: "bool"])
-    conn.updateSetting("useRestMetadata", [value: settings.useRestMetadata == true, type: "bool"])
-    conn.updateSetting("debugLogging", [value: settings.debugLogging == true, type: "bool"])
-    conn.updateSetting("traceLogging", [value: settings.traceLogging == true, type: "bool"])
-    conn.updateSetting("heartbeatMinutes", [value: (settings.heartbeatMinutes ?: "1").toString(), type: "enum"])
-    conn.updateSetting("watchdogMinutes", [value: (settings.watchdogMinutes ?: "3").toString(), type: "enum"])
+    Map desired = [
+        ip              : [settings.ip, "text"],
+        port            : ["${settings.port ?: 4025}", "number"],
+        password        : [settings.password, "text"],
+        restUsername    : [settings.restUsername ?: "user", "text"],
+        masterCode      : [settings.masterCode ?: "", "text"],
+        zoneCount       : ["${safeInt(settings.zoneCount, 27)}", "number"],
+        zoneSet         : [settings.zoneSet ?: "", "text"],
+        enablePanic     : [settings.enablePanic == true, "bool"],
+        requireCodeToArm: [settings.requireCodeToArm == true, "bool"],
+        diagnosticEvents: [settings.diagnosticEvents == true, "bool"],
+        recordTestEvents: [settings.recordTestEvents == true, "bool"],
+        useRestMetadata : [settings.useRestMetadata == true, "bool"],
+        debugLogging    : [settings.debugLogging == true, "bool"],
+        traceLogging    : [settings.traceLogging == true, "bool"],
+        heartbeatMinutes: [(settings.heartbeatMinutes ?: "1").toString(), "enum"],
+        watchdogMinutes : [(settings.watchdogMinutes ?: "3").toString(), "enum"]
+    ]
+
+    Map pushed = (state.pushedSettings instanceof Map) ? state.pushedSettings : [:]
+    List<String> changed = []
+    desired.each { String name, List spec ->
+        String signature = "${spec[0]}".hashCode().toString()
+        if (pushed[name] == signature) return
+        conn.updateSetting(name, [value: spec[0], type: spec[1]])
+        pushed[name] = signature
+        changed << name
+    }
+    state.pushedSettings = pushed
+    return changed
 }
 
 def refreshAll() {
@@ -341,6 +415,38 @@ def notifyHealth(String value) {
     getChildDevices()?.each { dev ->
         if (dev.deviceNetworkId != "uno-connection") dev.sendEvent(name: "healthStatus", value: value)
     }
+    handleOfflineAlert(value)
+}
+
+// An outage longer than the chosen time is worth a message, and so is the recovery that follows it.
+private void handleOfflineAlert(String value) {
+    Integer minutes = safeInt(settings.notifyOfflineMinutes, 5)
+    if (value == "offline") {
+        if (minutes > 0 && settings.notifyDevices) runIn(minutes * 60, "offlineAlert")
+        return
+    }
+
+    unschedule("offlineAlert")
+    if (state.offlineAlerted == true) {
+        state.offlineAlerted = false
+        sendNotice("UNO connection restored")
+    }
+}
+
+def offlineAlert() {
+    if (state.health != "offline") return
+    state.offlineAlerted = true
+    sendNotice("UNO connection lost: the alarm cannot be monitored until it is back".toString())
+}
+
+private void sendNotice(String message) {
+    def devices = settings.notifyDevices
+    if (!devices) return
+    try {
+        devices.each { it.deviceNotification(message) }
+    } catch (e) {
+        log.warn "Could not send notification: ${e}"
+    }
 }
 
 // A device created after the connection came up still needs to know the current state.
@@ -353,8 +459,7 @@ private void applyHealth(def dev) {
 
 // Sends the alarm, trouble and arm/disarm notifications that are switched on. Test reports never notify.
 def notifyEvent(Map event) {
-    def devices = settings.notifyDevices
-    if (!devices) return
+    if (!settings.notifyDevices) return
 
     String category = event.category
     boolean restore = event.restore == true
@@ -374,12 +479,134 @@ def notifyEvent(Map event) {
     }
     if (!wanted) return
 
-    String where = configuredPartitions().size() > 1 ? "${partitionLabelFor(safeInt(event.partition, 1))}: " : ""
+    // Partition 0 means a panel-wide event, which `safeInt` would turn into partition 1.
+    Integer partition = (event.partition == null) ? 1 : safeInt(event.partition.toString(), 1)
+    if (!partitionWanted(partition)) return
+    // Alarms always get through; everything else waits out quiet hours.
+    if (category != "alarm" && inQuietHours()) return
+
+    String where = (configuredPartitions().size() > 1 && partition >= 1) ? "${partitionLabelFor(partition)}: " : ""
     String message = "${where}${event.text}".toString()
+    if (category in ["trouble", "supervisory"] && isRepeatNotice(message, restore)) return
+    sendNotice(message)
+}
+
+private boolean partitionWanted(Integer partition) {
+    List<Integer> only = parseRange(settings.notifyPartitions, 1, 8).values
+    return !only || partition < 1 || only.contains(partition)
+}
+
+// Quiet hours come from two "time" inputs, which arrive as ISO strings such as 2026-11-22T22:00:00.000-0500.
+private boolean inQuietHours() {
+    Integer start = minutesOfDay(settings.quietStart)
+    Integer end = minutesOfDay(settings.quietEnd)
+    if (start == null || end == null || start == end) return false
+
+    Integer current = minutesOfDay("T" + new Date(now()).format("HH:mm", location.timeZone))
+    return start < end ? (current >= start && current < end) : (current >= start || current < end)
+}
+
+private Integer minutesOfDay(def time) {
+    def m = (time?.toString() =~ /T(\d{2}):(\d{2})/)
+    return m.find() ? (Integer.parseInt(m.group(1)) * 60 + Integer.parseInt(m.group(2))) : null
+}
+
+// The same trouble (a low battery that keeps reporting, say) is only sent once in 6 hours. Its restoral
+// is always sent, and it lets the next occurrence through.
+private boolean isRepeatNotice(String message, boolean restore) {
+    long cutoff = now() - 6L * 3600L * 1000L
+    Map seen = ((state.recentNotices instanceof Map) ? state.recentNotices : [:]).findAll { String k, def v -> (v as Long) > cutoff }
+
+    boolean repeat = false
+    if (restore) {
+        seen.remove(message.replace(" restored", ""))
+    } else {
+        repeat = seen.containsKey(message)
+        if (!repeat) seen[message] = now()
+    }
+    state.recentNotices = seen
+    return repeat
+}
+
+// ---- Status device, panel summary and stale sensors ----
+
+private void ensureStatusDevice() {
+    if (settings.createStatusDevice != true || getChildDevice("uno-status")) return
     try {
-        devices.each { it.deviceNotification(message) }
+        def created = addChildDevice("uno", "UNO Status", "uno-status", [name: "UNO Status", label: "UNO Status", isComponent: true])
+        applyHealth(created)
+        applyPanelSummary(created)
+        noteDeviceCreated()
+        logInfo("Created UNO Status device")
     } catch (e) {
-        log.warn "Could not send notification: ${e}"
+        log.warn "Could not create the UNO Status device (is the 'UNO Status' driver installed?): ${e}"
+    }
+}
+
+// The connection device reports which zones are open or bypassed and the troubles. The status device shows
+// all of it; with a single partition that partition's device shows the zones too (the UNO doesn't say which
+// partition a zone belongs to, so with several they stay on the status device).
+def notifyPanelSummary(Map summary) {
+    getChildDevice("uno-status")?.with { dev -> summary.each { String n, def v -> dev.sendEvent(name: n, value: v) } }
+    if (configuredPartitions().size() == 1) {
+        def dev = getChildDevice("uno-partition-${configuredPartitions()[0]}")
+        summary.findAll { String n, def v -> n in ["openZones", "bypassedZones"] }.each { String n, def v -> dev?.sendEvent(name: n, value: v) }
+    }
+}
+
+// Brings a newly created device up to date from what the connection device already knows.
+private void applyPanelSummary(def dev) {
+    def conn = getChildDevice("uno-connection")
+    if (!dev || !conn) return
+    boolean isStatus = dev.deviceNetworkId == "uno-status"
+    if (!isStatus && configuredPartitions().size() != 1) return
+
+    (isStatus ? ["openZones", "bypassedZones", "troubleSummary"] : ["openZones", "bypassedZones"]).each { String n ->
+        def v = conn.currentValue(n)
+        if (v != null) dev.sendEvent(name: n, value: v)
+    }
+}
+
+private void scheduleStaleCheck() {
+    unschedule("staleSensorCheck")
+    if (safeInt(settings.staleSensorDays, 0) <= 0) return
+    if (!state.staleSince) state.staleSince = now()
+    schedule("0 0 9 * * ?", "staleSensorCheck")
+}
+
+// Zones with no recorded activity in the chosen number of days. A zone that has never triggered counts only
+// once the check itself has been running that long, since there is no way to know how old its sensor is.
+def staleSensorCheck() {
+    Integer days = safeInt(settings.staleSensorDays, 0)
+    if (days <= 0) return
+
+    long cutoff = now() - days * 86400000L
+    List<String> stale = []
+    getChildDevices()?.each { dev ->
+        Integer zone = safeParseZoneFromDni(dev.deviceNetworkId ?: "")
+        if (!zone) return
+
+        Long last = parseFaultTime(dev.currentValue("lastFault"))
+        boolean isStale = (last != null) ? last < cutoff : ((state.staleSince ?: now()) as Long) < cutoff
+        if (isStale) stale << (zoneName(zone) ?: "Zone ${zone}").toString()
+    }
+
+    String summary = stale ? stale.sort().join(", ") : "none"
+    getChildDevice("uno-status")?.sendEvent(name: "staleSensors", value: summary)
+    if (stale && state.staleSummary != summary && settings.notifyTroubles != false) {
+        sendNotice("No activity for ${days} days: ${summary}".toString())
+    }
+    state.staleSummary = summary
+}
+
+private Long parseFaultTime(def text) {
+    if (!text) return null
+    try {
+        def fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+        fmt.setTimeZone(location.timeZone)
+        return fmt.parse(text.toString()).time
+    } catch (ignored) {
+        return null
     }
 }
 
@@ -389,6 +616,14 @@ def armStay(def partition = 1, String code = null) {
 
 def armAway(def partition = 1, String code = null) {
     getChildDevice("uno-connection")?.armAway(partition, code)
+}
+
+def armStayBypass(def partition = 1, String code = null) {
+    getChildDevice("uno-connection")?.armStayBypass(partition, code)
+}
+
+def armAwayBypass(def partition = 1, String code = null) {
+    getChildDevice("uno-connection")?.armAwayBypass(partition, code)
 }
 
 def chimeOn(def partition = 1) {
@@ -490,6 +725,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
             ]
         )
         applyHealth(created)
+        noteDeviceCreated()
         logDebug("Created zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
         return
     }
@@ -516,6 +752,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
             ]
         )
         applyHealth(recreated)
+        noteDeviceCreated()
         logInfo("Recreated zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
         return
     }

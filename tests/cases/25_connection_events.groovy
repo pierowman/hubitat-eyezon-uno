@@ -77,12 +77,13 @@ k.section("Event history") {
     List shown = new groovy.json.JsonSlurper().parseText(d.lastAttr("eventHistory"))
     k.check("the attribute shows the newest 10, newest first", shown.size() == 10 && shown[0].text == "Disarmed by user 12" && shown[0].type == "disarm", shown)
     k.check("each entry has a time, partition, code, type and text", shown[0].keySet() == ["at", "partition", "code", "type", "text"] as Set && shown[0].partition == 1 && shown[0].code == "401", shown[0])
-    k.check("state keeps the last 25", d.state.eventHistory.size() == 24)
+    k.check("memory keeps the last 25", d.historyList().size() == 24)
     (1..5).each { k.feed(d, "%03,1301010000\$") }
-    k.check("history never grows past 25", d.state.eventHistory.size() == 25)
+    k.check("history never grows past 25", d.historyList().size() == 25)
+    k.check("nothing is written to state", d.state.eventHistory == null, d.state.keySet())
 
     d.clearEventHistory()
-    k.check("clearEventHistory empties it", d.lastAttr("eventHistory") == "[]" && d.state.eventHistory.isEmpty())
+    k.check("clearEventHistory empties it", d.lastAttr("eventHistory") == "[]" && d.historyList().isEmpty())
 
     def spammy = k.authed()
     (1..10).each { k.feed(spammy, "%03,1130010050\$") }
@@ -91,7 +92,14 @@ k.section("Event history") {
     def kept = k.authed()
     k.feed(kept, "%03,1301010000\$")
     kept.initialize()
-    k.check("history survives re-initialising", kept.state.eventHistory.size() == 1)
+    k.check("history survives re-initialising", kept.historyList().size() == 1)
+
+    // A hub restart empties memory; the attribute is what remains, and it seeds the list again.
+    def restarted = k.newConn()
+    restarted.currentVals.eventHistory = kept.lastAttr("eventHistory")
+    k.check("history is rebuilt from the attribute after a restart", restarted.historyList().size() == 1 && restarted.historyList()[0].code == "301", restarted.historyList())
+    k.feed(restarted, "%03,1401010030\$")
+    k.check("and new events are added to it", restarted.historyList().size() == 2 && restarted.historyList()[0].code == "401")
 }
 
 k.section("Location events for automations") {

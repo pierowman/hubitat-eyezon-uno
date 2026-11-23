@@ -1,10 +1,16 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 
 // Codes and key presses waiting to be sent. In memory only (shared by every UNO Connection device on the hub),
 // so they are never written to the hub's database and disappear if the hub restarts.
 @Field static final ConcurrentHashMap CODE_VAULT = new ConcurrentHashMap()
+
+// Hub state is stored in the database, so data that changes constantly or can be rebuilt lives in memory instead.
+@Field static final ConcurrentHashMap ZONE_CACHE = new ConcurrentHashMap()   // zone settings -> zone list
+@Field static final ConcurrentHashMap CID_SEEN = new ConcurrentHashMap()     // "<device>:<zone>" -> time of the last fast-path event
+@Field static final ConcurrentHashMap HISTORY = new ConcurrentHashMap()      // device id -> recent events, newest first
 
 metadata {
     definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess",
@@ -36,7 +42,11 @@ metadata {
         attribute "panelTime", "string"
         attribute "panelMac", "string"
         attribute "lastAck", "string"
-        attribute "lastSystemMessage", "string"
+        attribute "lastKeypadSound", "string"
+        attribute "zoneTimers", "string"
+        attribute "openZones", "string"
+        attribute "bypassedZones", "string"
+        attribute "troubleSummary", "string"
         attribute "lastRawMessage", "string"
         attribute "zoneBitmapLength", "number"
         attribute "lastHeartbeat", "string"
@@ -48,6 +58,9 @@ metadata {
 
         command "armStay"
         command "armAway"
+        command "armStayBypass"
+        command "armAwayBypass"
+        command "dumpZoneTimers"
         command "chimeOn"
         command "chimeOff"
         command "bypassZone", [[name: "Zone", type: "NUMBER"]]
@@ -119,8 +132,11 @@ def initialize() {
     state.loggedIn = false
     state.loginSent = false
     state.lastFrameTs = 0L
-    state.lastCidByZone = [:]
     state.lastCidEvent = ""
+    // Earlier versions kept these in state.
+    state.remove("lastCidByZone")
+    state.remove("eventHistory")
+    clearCidSeen()
     state.restStartupDone = false
     state.authFailed = false
 
@@ -141,19 +157,27 @@ def initialize() {
 }
 
 private void scheduleHealthChecks() {
-    String hb = (settings.heartbeatMinutes ?: "1").toString()
+    state.heartbeatTick = 0
+    runEvery1Minute("minuteCheck")
+    logDebug("Scheduled heartbeat=${settings.heartbeatMinutes ?: '1'}m watchdog=${settings.watchdogMinutes ?: '3'}m")
+}
 
-    if (hb == "1") {
-        runEvery1Minute("heartbeatCheck")
-    } else if (hb == "5") {
-        runEvery5Minutes("heartbeatCheck")
+// One schedule drives both checks. The configured "no frames" threshold is applied inside watchdogCheck.
+def minuteCheck() {
+    int every = Math.max(safeInt(settings.heartbeatMinutes, 1), 1)
+    if (every > 1) {
+        int tick = safeInt(state.heartbeatTick, 0) + 1
+        state.heartbeatTick = tick >= every ? 0 : tick
+        if (tick >= every) heartbeatCheck()
     } else {
-        runEvery10Minutes("heartbeatCheck")
+        heartbeatCheck()
     }
+    watchdogCheck()
+}
 
-    // The check runs every minute; the configured "no frames" threshold is applied inside watchdogCheck.
-    runEvery1Minute("watchdogCheck")
-    logDebug("Scheduled heartbeat=${hb}m watchdog=${settings.watchdogMinutes ?: '3'}m")
+private void clearCidSeen() {
+    String prefix = "${device.id}:".toString()
+    CID_SEEN.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> CID_SEEN.remove(k) }
 }
 
 def reconnect() {
@@ -281,6 +305,39 @@ def armAway(def partition = 1, String code = null) {
     enqueueCommand("09", "${p}", "armAway")
 }
 
+// Bypasses whatever is open, then arms. The code check runs first so a rejected arm bypasses nothing.
+def armStayBypass(def partition = 1, String code = null) { armBypassing("armStay", partition, code) }
+def armAwayBypass(def partition = 1, String code = null) { armBypassing("armAway", partition, code) }
+
+private void armBypassing(String which, def partition, String code) {
+    Integer p = normalizePartition(partition)
+    if (p == null) return
+    if (!armCodeAccepted("${which}Bypass".toString(), code)) return
+
+    logInfo("${which}: bypassing open zones on partition ${p} first")
+    enqueueCommand("06", "${p}", "bypassOpenZones")
+    if (which == "armStay") armStay(p, code) else armAway(p, code)
+}
+
+// TPI command 02: the UNO answers with a %FF frame of per-zone timers.
+def dumpZoneTimers() {
+    enqueueCommand("02", "", "zoneTimers")
+}
+
+// Forgets what was last reported, so the next frames re-announce every zone and partition.
+// The app calls this after it creates or recreates devices, which start out knowing nothing.
+def resyncStates() {
+    state.lastZoneBitmap = null
+    state.lastPartitionBitmap = null
+    state.partitionStatus = [:]
+    state.lastBypassBitmap = null
+    state.lastTroubleBitmap = null
+    state.troubleBytes = [:]
+    state.zoneTemps = [:]
+    state.partitionTemps = [:]
+    refreshAll()
+}
+
 // "Require code to arm" is a local gate: the UNO's arm commands (08/09) take no code, so the code is
 // compared with the configured master code here. Disarming always needs a code and is checked by the UNO.
 private boolean armCodeAccepted(String name, String code) {
@@ -402,7 +459,7 @@ def clearCommandQueue() {
 }
 
 private String driverVersion() {
-    return "1.2.0"
+    return "1.3.0"
 }
 
 // ---- Health: children report online while the connection is authenticated ----
@@ -463,7 +520,7 @@ def debugDump() {
     lines << "partitions: ${state.partitionStatus ?: [:]}"
     lines << "troubles: ${state.troubleBytes ?: [:]}"
     lines << "last ack: ${device.currentValue('lastAck') ?: 'none'}, last CID: ${state.lastCidEvent ?: 'none'}"
-    ((state.eventHistory instanceof List) ? state.eventHistory : []).take(5).each { Map e ->
+    historyList().take(5).each { Map e ->
         lines << "event ${e.at} p${e.partition} ${e.type}: ${e.text}"
     }
 
@@ -550,10 +607,17 @@ private Integer configuredZoneCount() {
 }
 
 // Zones this integration manages: the zone set if one is configured, otherwise 1..zone count.
+// The result only depends on two settings, so it is worked out once and reused for every frame.
 private List<Integer> configuredZones() {
+    String key = "${settings.zoneSet}|${settings.zoneCount}".toString()
+    List<Integer> cached = (List<Integer>) ZONE_CACHE.get(key)
+    if (cached != null) return cached
+
     Map parsed = parseRange(settings.zoneSet, 1, 128)
-    if (parsed.values) return parsed.values
-    return (1..configuredZoneCount()).collect { it as Integer }
+    List<Integer> zones = parsed.values ? (parsed.values as List<Integer>) : (1..configuredZoneCount()).collect { it as Integer }
+    if (ZONE_CACHE.size() > 16) ZONE_CACHE.clear()
+    ZONE_CACHE.put(key, zones)
+    return zones
 }
 
 // Parses "1-3,7,10-12" into sorted unique numbers within min..max; anything else is reported in invalid.
@@ -820,16 +884,16 @@ def parse(String message) {
         sendEvent(name: "lastHeartbeat", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
     }
 
-    state.rxBuffer = (state.rxBuffer ?: "") + decoded
+    // Work on a local copy and store the remainder once: every state access is a database round trip on the hub.
+    String buffer = (state.rxBuffer ?: "") + decoded
 
     // The prompt has no terminator, so drop it from the buffer or it would prefix the "OK" reply.
     if (!state.loggedIn && !state.loginSent) {
-        String rx = state.rxBuffer
-        int idx = rx.toLowerCase().indexOf("login")
+        int idx = buffer.toLowerCase().indexOf("login")
         if (idx >= 0) {
             int end = idx + 5
-            if (rx.length() > end && rx.substring(end, end + 1) == ":") end++
-            state.rxBuffer = rx.substring(end)
+            if (buffer.length() > end && buffer.substring(end, end + 1) == ":") end++
+            buffer = buffer.substring(end)
             logInfo("UNO presented login prompt")
             sendEvent(name: "connectionState", value: "loginPrompt")
             login()
@@ -837,7 +901,6 @@ def parse(String message) {
     }
 
     while (true) {
-        String buffer = state.rxBuffer ?: ""
         int idxDollar = buffer.indexOf('$')
         int idxLf = buffer.indexOf('\n')
         int idxCr = buffer.indexOf('\r')
@@ -847,7 +910,7 @@ def parse(String message) {
 
         int endIdx = candidates.min()
         String frame = buffer.substring(0, endIdx).trim()
-        state.rxBuffer = buffer.substring(endIdx + 1)
+        buffer = buffer.substring(endIdx + 1)
 
         if (frame) {
             // One bad frame must not stop the rest of the buffer from being processed.
@@ -861,12 +924,14 @@ def parse(String message) {
 
     // Login replies are plain words; accept them even if the panel doesn't terminate them.
     if (state.loginSent && !state.loggedIn) {
-        String pending = (state.rxBuffer ?: "").trim()
+        String pending = buffer.trim()
         if (pending.equalsIgnoreCase("OK") || pending.equalsIgnoreCase("FAILED") || pending.equalsIgnoreCase("Timed Out!") || pending.equalsIgnoreCase("Timed Out")) {
-            state.rxBuffer = ""
+            buffer = ""
             parseFrame(pending)
         }
     }
+
+    state.rxBuffer = buffer
 }
 
 private String decodeIncoming(String message) {
@@ -979,13 +1044,16 @@ private void parseFrame(String frame) {
             handlePartitionTemperatures(parts)
             break
         case "09":
-            handleSystemMessage(parts)
+            handleKeypadSound(parts)
             break
         case "0A":
             handlePersistentSound(parts)
             break
         case "10":
             handleChime(parts)
+            break
+        case "FF":
+            handleZoneTimers(parts)
             break
         default:
             logDebug("Unhandled UNO frame ${code}: ${parts}")
@@ -1029,7 +1097,7 @@ def restStartupSync() {
             if (!zones.contains(zoneNum)) return
 
             boolean active = isRestZoneActive(t)
-            routeZoneUpdate(zoneNum, active, active ? "1" : "0")
+            routeZoneUpdate(zoneNum, active)
         }
     }
 
@@ -1177,62 +1245,69 @@ private void handleZoneBitmap(List<String> parts) {
         logWarn("Ignoring malformed zone bitmap: ${bitmapHex.take(64)}")
         return
     }
-    sendEvent(name: "zoneBitmapLength", value: bitmapHex.length())
-
     String previous = state.lastZoneBitmap
+    // Polls and refreshes repeat the same bitmap; there is nothing to do for those.
+    if (previous == bitmapHex) return
+    if (previous == null || previous.length() != bitmapHex.length()) sendEvent(name: "zoneBitmapLength", value: bitmapHex.length())
     state.lastZoneBitmap = bitmapHex
 
-    Map<Integer, Boolean> currentMap = decodeZoneBitmap(bitmapHex)
-    Map<Integer, Boolean> previousMap = previous ? decodeZoneBitmap(previous) : [:]
-
-    // Bitmaps are padded to whole bytes; only the configured zones are real.
+    // Bitmaps are padded to whole bytes; only the configured zones are real. A zone whose byte is
+    // unchanged cannot have changed, so those are skipped without decoding.
     for (Integer zone : configuredZones()) {
-        boolean newState = currentMap.get(zone, false)
-        boolean oldState = previousMap.get(zone, false)
+        if (previous != null && byteAt(previous, zone) == byteAt(bitmapHex, zone)) continue
 
-        if (previous == null || newState != oldState) {
-            boolean suppressDebug = false
-            Long lastCidTs = null
-
-            if (state.lastCidByZone instanceof Map) {
-                lastCidTs = state.lastCidByZone["${zone}"] as Long
-            }
-
-            if (lastCidTs != null) {
-                long ageMs = now() - lastCidTs
-                if (ageMs >= 0 && ageMs <= 1500L) {
-                    suppressDebug = true
-                }
-            }
+        boolean newState = zoneBit(bitmapHex, zone)
+        if (previous == null || newState != zoneBit(previous, zone)) {
+            Long lastCidTs = (Long) CID_SEEN.get("${device.id}:${zone}".toString())
+            boolean suppressDebug = lastCidTs != null && (now() - lastCidTs) >= 0 && (now() - lastCidTs) <= 1500L
 
             if (!suppressDebug) {
                 logDebug("Zone ${zone} -> ${newState ? 'active/open' : 'inactive/closed'}")
             }
 
             emitZoneFastEvent(zone, newState)
-            routeZoneUpdate(zone, newState, newState ? "1" : "0")
+            routeZoneUpdate(zone, newState)
         }
+    }
+
+    publishZoneSummary()
+}
+
+// Zone N is bit (N-1) % 8 of byte (N-1) / 8 (spec 3.3, command 01).
+private String byteAt(String hex, Integer zone) {
+    int idx = (zone - 1).intdiv(8) * 2
+    return (idx + 2 <= hex.length()) ? hex.substring(idx, idx + 2) : ""
+}
+
+private boolean zoneBit(String hex, Integer zone) {
+    String b = byteAt(hex, zone)
+    if (!b) return false
+    return ((Integer.parseInt(b, 16) >> ((zone - 1) % 8)) & 0x01) == 1
+}
+
+// Which zones are open and which are bypassed, by name, for dashboards and notifications.
+private void publishZoneSummary() {
+    List<Integer> zones = configuredZones()
+    String open = zoneList(zones, state.lastZoneBitmap)
+    String bypassed = zoneList(zones, state.lastBypassBitmap)
+
+    Map changed = [:]
+    if (device.currentValue("openZones") != open) changed.openZones = open
+    if (device.currentValue("bypassedZones") != bypassed) changed.bypassedZones = bypassed
+    if (!changed) return
+
+    changed.each { String name, String value -> sendEvent(name: name, value: value) }
+    try {
+        parent?.notifyPanelSummary(changed)
+    } catch (e) {
+        logDebug("Failed to forward the zone summary: ${e}")
     }
 }
 
-private Map<Integer, Boolean> decodeZoneBitmap(String hex) {
-    Map<Integer, Boolean> result = [:]
-    if (!hex) return result
-
-    int zoneNumber = 1
-    for (int byteIndex = 0; byteIndex < hex.length(); byteIndex += 2) {
-        if (byteIndex + 2 > hex.length()) break
-        String byteHex = hex.substring(byteIndex, byteIndex + 2)
-        int value = Integer.parseInt(byteHex, 16)
-
-        for (int bit = 0; bit < 8; bit++) {
-            boolean open = ((value >> bit) & 0x01) == 1
-            result[zoneNumber] = open
-            zoneNumber++
-        }
-    }
-
-    return result
+private String zoneList(List<Integer> zones, String bitmap) {
+    if (!bitmap) return "none"
+    List<String> names = zones.findAll { Integer z -> zoneBit(bitmap, z) }.collect { Integer z -> zoneLabel(z) }
+    return names ? names.join(", ") : "none"
 }
 
 // %02 carries one status byte per partition (partition 1 first). Only changes are forwarded.
@@ -1313,9 +1388,11 @@ private void handleCidEvent(List<String> parts) {
 
     if (zone <= 0 || !configuredZones().contains(zone)) return
 
-    // Tamper is its own condition, not the zone opening, so it updates a tamper attribute instead.
-    if (TAMPER_CODES.contains(eventCode) && (isEvent || isRestore)) {
-        routeTamperUpdate(zone, isEvent)
+    // Tamper, low battery and lost supervision are their own conditions, not the zone opening,
+    // so they update an attribute on the zone instead.
+    Map condition = ZONE_CONDITIONS[eventCode]
+    if (condition && (isEvent || isRestore)) {
+        routeZoneCondition(zone, condition, isEvent)
         return
     }
 
@@ -1331,16 +1408,22 @@ private void handleCidEvent(List<String> parts) {
 
     boolean active = isEvent && !isRestore
 
-    state.lastCidByZone = state.lastCidByZone ?: [:]
-    state.lastCidByZone["${zone}"] = now()
+    CID_SEEN.put("${device.id}:${zone}".toString(), now())
 
     logInfo("CID fast path: zone ${zone} -> ${active ? 'active/open' : 'restore/closed'} (code ${eventCode})")
     emitZoneFastEvent(zone, active)
-    routeZoneUpdate(zone, active, active ? "1" : "0")
+    routeZoneUpdate(zone, active)
 }
 
-// Contact ID codes that mean "this zone's sensor was tampered with" (137 tamper, 144 sensor tamper, 383 sensor tamper trouble).
-@Field static final Set TAMPER_CODES = ["137", "144", "383"] as Set
+// Contact ID codes that describe a condition of the zone's sensor rather than the zone opening.
+// code -> zone attribute, its value while the condition is present and when it clears, and how to say it.
+@Field static final Map ZONE_CONDITIONS = [
+    "137": [attr: "tamper", on: "detected", off: "clear", text: "tamper"],
+    "144": [attr: "tamper", on: "detected", off: "clear", text: "tamper"],
+    "383": [attr: "tamper", on: "detected", off: "clear", text: "tamper"],
+    "384": [attr: "batteryStatus", on: "low", off: "ok", text: "low battery"],
+    "381": [attr: "supervision", on: "lost", off: "ok", text: "supervision"]
+]
 
 private String suggestTypeFromCid(String eventCode) {
     switch (eventCode) {
@@ -1544,26 +1627,46 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
         events << [name: "lastArmedBy", value: d.who, isStateChange: true] << [name: "lastArmedAt", value: at, isStateChange: true]
     } else if (d.category == "disarm") {
         events << [name: "lastDisarmedBy", value: d.who, isStateChange: true] << [name: "lastDisarmedAt", value: at, isStateChange: true]
+    } else if (d.category == "alarm" && qualifier == "1") {
+        // Which alarm and where, ready for rules and dashboards (the restoral is not an alarm).
+        String zoneText = (cidField(code, "alarm") == "zone" && zoneOrUser > 0) ? zoneLabel(zoneOrUser) : "none"
+        events << [name: "lastAlarmType", value: (CID_EVENTS[code] ? CID_EVENTS[code][1] : "Event ${code}"), isStateChange: true]
+        events << [name: "lastAlarmZone", value: zoneText, isStateChange: true] << [name: "lastAlarmAt", value: at, isStateChange: true]
     }
     parent?.notifyPartitionEvents(partition, events)
 }
 
-// Keeps the last 25 events in state and shows the newest 10 as JSON in the eventHistory attribute.
+// Keeps the last 25 events in memory (the hub restarting empties it) and shows the newest 10 as JSON in
+// the eventHistory attribute, which survives a restart and seeds the list again.
+private List historyList() {
+    String id = "${device.id}".toString()
+    List history = (List) HISTORY.get(id)
+    if (history == null) {
+        history = []
+        try {
+            def parsed = new JsonSlurper().parseText((device.currentValue("eventHistory") ?: "[]").toString())
+            if (parsed instanceof List) history.addAll(parsed)
+        } catch (ignored) {
+        }
+        HISTORY.put(id, history)
+    }
+    return history
+}
+
 private void recordEventHistory(Map entry) {
-    List history = (state.eventHistory instanceof List) ? state.eventHistory : []
+    List history = historyList()
     history.add(0, entry)
     while (history.size() > 25) history.remove(history.size() - 1)
-    state.eventHistory = history
     publishEventHistory()
 }
 
 private void publishEventHistory() {
-    List recent = ((state.eventHistory instanceof List) ? state.eventHistory : []).take(10)
+    List recent = historyList().take(10)
     sendEvent(name: "eventHistory", value: recent ? JsonOutput.toJson(recent) : "[]")
 }
 
 def clearEventHistory() {
-    state.eventHistory = []
+    historyList().clear()
     publishEventHistory()
     logInfo("Cleared event history")
 }
@@ -1579,35 +1682,38 @@ private void handleBypassBitmap(List<String> parts) {
     }
 
     String previous = state.lastBypassBitmap
+    if (previous == bitmap) return
     state.lastBypassBitmap = bitmap
 
-    Map<Integer, Boolean> current = decodeZoneBitmap(bitmap)
-    Map<Integer, Boolean> before = previous ? decodeZoneBitmap(previous) : [:]
-
     for (Integer zone : configuredZones()) {
-        boolean bypassed = current.get(zone, false)
-        if (previous == null || bypassed != before.get(zone, false)) {
+        if (previous != null && byteAt(previous, zone) == byteAt(bitmap, zone)) continue
+
+        boolean bypassed = zoneBit(bitmap, zone)
+        if (previous == null || bypassed != zoneBit(previous, zone)) {
             if (previous != null) logInfo("Zone ${zone} ${bypassed ? 'bypassed' : 'no longer bypassed'}")
             routeBypassUpdate(zone, bypassed)
         }
     }
+
+    publishZoneSummary()
 }
 
-// Tamper changes only update existing zone devices; they never create new ones.
-private void routeTamperUpdate(Integer zone, boolean tampered) {
+// Conditions only update existing zone devices; they never create new ones.
+private void routeZoneCondition(Integer zone, Map condition, boolean present) {
     def child = findZoneChild("uno-zone-${zone}")
     if (!child) return
 
-    logInfo("Zone ${zone} tamper ${tampered ? 'detected' : 'cleared'}")
+    String value = present ? condition.on : condition.off
+    logInfo("Zone ${zone} ${condition.text} ${present ? 'detected' : 'cleared'}")
     try {
         child.sendEvent(
-            name: "tamper",
-            value: tampered ? "detected" : "clear",
-            descriptionText: "Zone ${zone} tamper ${tampered ? 'detected' : 'cleared'}",
+            name: condition.attr,
+            value: value,
+            descriptionText: "Zone ${zone} ${condition.text} ${present ? 'detected' : 'cleared'}",
             isStateChange: true
         )
     } catch (e) {
-        logDebug("Failed to update tamper state for zone ${zone}: ${e}")
+        logDebug("Failed to update ${condition.attr} for zone ${zone}: ${e}")
     }
 }
 
@@ -1688,12 +1794,14 @@ private void handleTroubleBitmap(List<String> parts) {
     }
     state.lastTroubleBitmap = bitmap
     state.troubleBytes = state.troubleBytes ?: [:]
+    boolean anyChange = false
 
     for (int idx = 0; idx < 8 && (idx * 2 + 2) <= bitmap.length(); idx++) {
         Integer partition = idx + 1
         String byteHex = bitmap.substring(idx * 2, idx * 2 + 2)
         if (byteHex == state.troubleBytes["${partition}"]) continue
         state.troubleBytes["${partition}"] = byteHex
+        anyChange = true
 
         Map attrs = troubleAttributes(safeParseHex(byteHex, 0))
 
@@ -1713,6 +1821,31 @@ private void handleTroubleBitmap(List<String> parts) {
 
         parent?.notifyPartitionEvents(partition, attrs.collect { String name, String value -> [name: name, value: value] })
     }
+
+    if (anyChange) {
+        String summary = troubleSummary()
+        if (device.currentValue("troubleSummary") != summary) {
+            sendEvent(name: "troubleSummary", value: summary)
+            try {
+                parent?.notifyPanelSummary([troubleSummary: summary])
+            } catch (e) {
+                logDebug("Failed to forward the trouble summary: ${e}")
+            }
+        }
+    }
+}
+
+// Every partition's active troubles in one line: "AC failure" when only partition 1 has any, otherwise "P1: ...; P3: ...".
+private String troubleSummary() {
+    Map bytes = (state.troubleBytes instanceof Map) ? state.troubleBytes : [:]
+    List<String> perPartition = []
+    (1..8).each { Integer p ->
+        String detail = troubleAttributes(safeParseHex((bytes["${p}"] ?: "00").toString(), 0)).troubleDetail
+        if (detail != "none") perPartition << "${p}|${detail}".toString()
+    }
+    if (!perPartition) return "none"
+    if (perPartition.size() == 1 && perPartition[0].startsWith("1|")) return perPartition[0].substring(2)
+    return perPartition.collect { String s -> "P${s.substring(0, 1)}: ${s.substring(2)}".toString() }.join("; ")
 }
 
 private Integer safeParseHex(String s, Integer fallback = 0) {
@@ -1791,14 +1924,81 @@ private void handlePartitionTemperatures(List<String> parts) {
     }
 }
 
-private void handleSystemMessage(List<String> parts) {
-    String msg = parts.drop(1).join(",")
-    sendEvent(name: "lastSystemMessage", value: msg.take(1024))
-    logDebug("System message: ${msg}")
+// %09: a one-time keypad sound. B = that many beeps, Z = a continuous tone for that many seconds (the value is hex).
+// Sounds change constantly, so they are only published when diagnostic events are on.
+private void handleKeypadSound(List<String> parts) {
+    if (parts.size() < 4) return
+
+    Integer partition = safeParseInt(cleanPayload(parts[1]), 0)
+    String kind = cleanPayload(parts[2]).toUpperCase()
+    Integer value = safeParseHex(cleanPayload(parts[3]), -1)
+    if (partition < 1 || partition > 8 || !(kind in ["B", "Z"]) || value < 0) {
+        logDebug("Ignoring malformed keypad sound frame: ${parts}")
+        return
+    }
+
+    publishKeypadSound(partition, kind == "B" ? "${value} beep${value == 1 ? '' : 's'}" : "tone for ${value}s")
 }
 
+// %0A: a persistent keypad sound: <partition>,<idle on 1/off 0>,<beeps>,<interval seconds>. All zero cancels it.
 private void handlePersistentSound(List<String> parts) {
-    logDebug("Persistent sound frame received")
+    if (parts.size() < 5) return
+
+    Integer partition = safeParseInt(cleanPayload(parts[1]), 0)
+    String idle = cleanPayload(parts[2])
+    Integer beeps = safeParseHex(cleanPayload(parts[3]), -1)
+    Integer interval = safeParseHex(cleanPayload(parts[4]), -1)
+    if (partition < 1 || partition > 8 || !(idle in ["0", "1"]) || beeps < 0 || interval < 0) {
+        logDebug("Ignoring malformed persistent sound frame: ${parts}")
+        return
+    }
+
+    String text
+    if (idle == "0" && beeps == 0 && interval == 0) {
+        text = "stopped"
+    } else if (idle == "1" && beeps == 0 && interval == 0) {
+        text = "continuous tone"
+    } else {
+        text = "${beeps} beep${beeps == 1 ? '' : 's'} every ${interval}s"
+    }
+    publishKeypadSound(partition, text)
+}
+
+private void publishKeypadSound(Integer partition, String text) {
+    logDebug("Keypad sound, partition ${partition}: ${text}")
+    if (settings.diagnosticEvents != true) return
+
+    sendEvent(name: "lastKeypadSound", value: text, isStateChange: true)
+    parent?.notifyPartitionEvents(partition, [[name: "lastKeypadSound", value: text, isStateChange: true]])
+}
+
+// %FF: 128 little-endian 16 bit zone timers (512 hex characters). A timer counts down from FFFF (open) in
+// 5 second ticks, and 0000 means the zone closed too long ago to remember.
+private void handleZoneTimers(List<String> parts) {
+    if (parts.size() < 2) return
+
+    String payload = cleanPayload(parts[1]).toUpperCase()
+    if (!(payload ==~ /[0-9A-F]+/)) {
+        logWarn("Ignoring malformed zone timer frame: ${payload.take(64)}")
+        return
+    }
+
+    Map timers = [:]
+    for (Integer zone : configuredZones()) {
+        int idx = (zone - 1) * 4
+        if (idx + 4 > payload.length()) break
+
+        // Little endian: "FEFF" is 0xFFFE.
+        int word = Integer.parseInt(payload.substring(idx + 2, idx + 4) + payload.substring(idx, idx + 2), 16)
+        if (word == 0xFFFF) {
+            timers["${zone}"] = "open"
+        } else if (word > 0) {
+            timers["${zone}"] = (0xFFFF - word) * 5
+        }
+    }
+
+    // Seconds since each zone last closed (or "open"); zones not seen for about 3.8 days are left out.
+    sendEvent(name: "zoneTimers", value: timers ? JsonOutput.toJson(timers) : "{}")
 }
 
 private void handleChime(List<String> parts) {
@@ -1831,7 +2031,7 @@ private void emitZoneFastEvent(Integer zoneNum, boolean active) {
     }
 }
 
-private void routeZoneUpdate(Integer zoneNum, boolean active, String digit) {
+private void routeZoneUpdate(Integer zoneNum, boolean active) {
     String dni = "uno-zone-${zoneNum}"
 
     def child = findZoneChild(dni)
@@ -1846,7 +2046,7 @@ private void routeZoneUpdate(Integer zoneNum, boolean active, String digit) {
         return
     }
 
-    updateZoneChild(child, zoneNum, active, digit)
+    updateZoneChild(child, zoneNum, active)
 }
 
 private findZoneChild(String dni) {
@@ -1866,84 +2066,12 @@ private findZoneChild(String dni) {
     return child
 }
 
-private void updateZoneChild(child, Integer zoneNum, boolean active, String digit) {
+// The zone driver knows its own capability, so one call replaces a capability check and an event per type.
+private void updateZoneChild(child, Integer zoneNum, boolean active) {
     try {
-        child.sendEvent(name: "zoneStateDigit", value: digit, isStateChange: true)
-    } catch (ignored) {
-    }
-
-    if (active) {
-        try {
-            child.sendEvent(
-                name: "lastFault",
-                value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone),
-                isStateChange: true
-            )
-        } catch (ignored) {
-        }
-    }
-
-    if (hasCapabilitySafe(child, "ContactSensor")) {
-        String value = active ? "open" : "closed"
-        child.sendEvent(
-            name: "contact",
-            value: value,
-            type: "physical",
-            descriptionText: "Zone ${zoneNum} ${value}",
-            isStateChange: true
-        )
-    }
-
-    if (hasCapabilitySafe(child, "MotionSensor")) {
-        String value = active ? "active" : "inactive"
-        child.sendEvent(
-            name: "motion",
-            value: value,
-            type: "physical",
-            descriptionText: "Zone ${zoneNum} motion ${value}",
-            isStateChange: true
-        )
-    }
-
-    if (hasCapabilitySafe(child, "SmokeDetector")) {
-        String value = active ? "detected" : "clear"
-        child.sendEvent(
-            name: "smoke",
-            value: value,
-            type: "physical",
-            descriptionText: "Zone ${zoneNum} smoke ${value}",
-            isStateChange: true
-        )
-    }
-
-    if (hasCapabilitySafe(child, "CarbonMonoxideDetector")) {
-        String value = active ? "detected" : "clear"
-        child.sendEvent(
-            name: "carbonMonoxide",
-            value: value,
-            type: "physical",
-            descriptionText: "Zone ${zoneNum} carbon monoxide ${value}",
-            isStateChange: true
-        )
-    }
-
-    if (hasCapabilitySafe(child, "WaterSensor")) {
-        String value = active ? "wet" : "dry"
-        child.sendEvent(
-            name: "water",
-            value: value,
-            type: "physical",
-            descriptionText: "Zone ${zoneNum} water ${value}",
-            isStateChange: true
-        )
-    }
-}
-
-private boolean hasCapabilitySafe(child, String cap) {
-    try {
-        return child.hasCapability(cap)
-    } catch (ignored) {
-        return false
+        child.applyZoneState(active)
+    } catch (e) {
+        logWarn("Zone ${zoneNum} did not accept the update; update all UNO zone drivers to the same version: ${e}")
     }
 }
 

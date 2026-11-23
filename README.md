@@ -16,6 +16,7 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - One partition device per configured partition (1-8), each with its own state, trouble flags and commands
 - Arm Stay, Arm Away and Disarm per partition
 - Optional **Require the master code to arm**, checked locally (off by default)
+- Arm with bypass (`armStayBypass` / `armAwayBypass`): bypasses whatever is open, then arms
 - Hubitat `SecurityKeypad` capability on each partition device: a keypad tile on dashboards, and usable as an HSM keypad
 - Door chime on/off per partition
 - Keypress command (`sendKeys`) to send a key sequence to a partition
@@ -28,6 +29,8 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Per-zone `bypassed` attribute with `bypass` / `unbypass` commands; bypass-all-open and un-bypass-all per partition
 - Per-zone `lastFault` timestamp
 - Per-zone `tamper` attribute (`TamperAlert`), so a tamper never looks like a door opening
+- Per-zone `batteryStatus` (`ok`/`low`) and `supervision` (`ok`/`lost`) from the UNO's low-battery and lost-supervision events
+- Lists of the open and bypassed zones by name (`openZones`, `bypassedZones`) on the connection device, and on the partition device when there is only one partition
 - Per-zone `temperature` for wireless zones that report one, and inside/outside temperature on the partition
 - Fast location events for low-latency automations: `unoZoneEvent`
 - CID fast-path for zone alarm events, ahead of the next zone bitmap
@@ -37,13 +40,19 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 
 **Notifications**
 - Optional push notifications from the app for alarms, troubles and arm/disarm, so a rule isn't needed for the basics
+- Quiet hours (alarms always get through), a partition filter, repeat suppression for troubles, and an alert if the UNO connection is lost for too long
+
+**Status device (optional)**
+- A `UNO Status` device with `openZones`, `bypassedZones`, `troubleSummary` and `staleSensors`, for one dashboard tile. Optionally reports sensors with no activity for a number of days
 
 **Monitoring and diagnostics**
 - Plain-language event descriptions from the UNO's Contact ID events: who armed or disarmed ("Armed by Alice"), which sensor alarmed, troubles and restorals
-- Event history (the last 10 events as JSON, 25 kept) and per-partition `lastArmedBy` / `lastDisarmedBy` with times
+- Event history (the last 10 events as JSON) and per-partition `lastArmedBy` / `lastDisarmedBy` with times
+- `lastAlarmType`, `lastAlarmZone` and `lastAlarmAt` on the partition, for rules about what alarmed and where
 - A location event `unoEvent` for every Contact ID event, for rules
-- Panel trouble decoding per partition (AC failure, low battery, server offline, zone trouble, siren fault and more)
+- Panel trouble decoding per partition (AC failure, low battery, server offline, zone trouble, siren fault and more), and a one-line `troubleSummary`
 - Panel model, firmware, MAC address and time
+- Zone timers (`dumpZoneTimers`) and, with diagnostic events on, keypad sounds (`lastKeypadSound`)
 - Status section on the app page: connection state, panel details, and whether the REST credentials were accepted
 - Heartbeat polling and watchdog reconnect with exponential back-off (see [Connection behaviour](#connection-behaviour))
 - Online/offline `healthStatus` and `HealthCheck` (`ping`) on every device, driven by the connection to the UNO
@@ -69,6 +78,7 @@ See [INSTALL.md](INSTALL.md). In short: install the drivers, install the app, ad
 | One per partition (`uno-partition-N`) | UNO Partition | For each partition in **Partitions to create** (partition 1 by default) |
 | One per zone (`uno-zone-N`) | UNO Zone Contact / Motion / Smoke / CO / Water | For each zone in the zone set (or 1..Zone Count) |
 | One per PGM (`uno-pgm-N`) | UNO PGM | For each output in **PGM outputs to create** (none by default). The driver is optional in HPM |
+| `uno-status` | UNO Status | When **Create a UNO Status device** is on. The driver is optional in HPM |
 
 Device network IDs are fixed, so existing rules and dashboards keep working across upgrades. Only one UNO per hub is supported.
 
@@ -90,9 +100,10 @@ Device network IDs are fixed, so existing rules and dashboards keep working acro
 | User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
 | Allow panic commands | Off by default. See [Panic commands](#panic-commands) |
 | PGM outputs to create / PGM names | e.g. `1,3-4` and `1:Garage Door`. See [PGM outputs](#pgm-outputs) |
-| Notifications | Devices to notify, and whether to send alarms (on by default), troubles (on by default) and arm/disarm (off by default). See [Notifications](#notifications) |
+| Notifications | Devices to notify, and whether to send alarms (on by default), troubles (on by default) and arm/disarm (off by default). Also quiet hours, a partition filter and the connection-lost alert. See [Notifications](#notifications) |
+| Create a UNO Status device / Stale sensor days | Off by default. See [Status device](#status-device) |
 | Debug / trace logging | Trace logs show the TPI traffic with passwords and codes masked |
-| Publish diagnostic events | Off by default. Publishes `lastHeartbeat`, `lastRawMessage` and `panelTime`, which change constantly |
+| Publish diagnostic events | Off by default. Publishes `lastHeartbeat`, `lastRawMessage`, `panelTime` and `lastKeypadSound`, which change constantly |
 | Record Contact ID test reports | Off by default. The UNO's periodic test reports (code 602) are otherwise left out of the history and events |
 | Heartbeat interval / Reconnect if no frames seen for | See [Connection behaviour](#connection-behaviour) |
 
@@ -106,6 +117,7 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 |---|---|---|
 | Partition | `armStay`, `armAway` | Fail if **Require the master code to arm** is on, because they carry no code |
 | Partition | `armStayWithCode(code)`, `armAwayWithCode(code)` | Arm with a code, for when a code is required |
+| Partition | `armStayBypass(code)`, `armAwayBypass(code)` | Bypass the open zones, then arm. The code is only needed when arming requires one, and is checked before anything is bypassed. Whether the UNO accepts the arm straight after the bypass is untested |
 | Partition | `armHome`, `armNight`, `armAway` | `SecurityKeypad` / HSM entry points. Night arms stay (the UNO has no night mode). A request for the state the partition is already in is skipped |
 | Partition | `disarm(code)` | Uses the master code if no code is given. Code must be 4-6 digits |
 | Partition | `chimeOn`, `chimeOff` | |
@@ -119,8 +131,9 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 | Connection | `triggerPgm(number)` | PGM 1-14 |
 | Connection | `bypassZone(zone)`, `unbypassZone(zone)` | Zone 1-128 |
 | Connection | `sendKeys(keys, partition)`, `panic(type, partition)` | For rules that address a partition by number |
-| Connection | `armStay`, `armAway`, `chimeOn`, `chimeOff`, `bypassOpenZones`, `unbypassAllZones` | Partition 1 from the device page |
+| Connection | `armStay`, `armAway`, `armStayBypass`, `armAwayBypass`, `chimeOn`, `chimeOff`, `bypassOpenZones`, `unbypassAllZones` | Partition 1 from the device page |
 | Connection | `disarm`, `refreshAll`, `poll`, `reconnect`, `restStartupSync`, `clearCommandQueue`, `clearEventHistory` | Maintenance and manual control |
+| Connection | `dumpZoneTimers` | Asks the UNO for its zone timers and publishes them as `zoneTimers` (see [Attributes](#attributes)) |
 | Connection | `debugDump` | Logs a redacted snapshot (settings, connection, queue, partitions, recent events) for support. Passwords and codes are never included |
 
 > **Warning:** the partition device uses Hubitat's `Alarm` capability, and its `off` command **disarms** the partition. Anything that turns the "alarm" off (a rule, a dashboard tile, a voice assistant) will disarm your system. `siren`, `strobe` and `both` do nothing.
@@ -161,6 +174,20 @@ Choose one or more notification devices in the app to get messages without writi
 - **Arm / disarm** (off by default): including who did it, for example `Armed by Alice`.
 
 With more than one partition, the message starts with the partition name. Contact ID test reports are never sent. A failing notification device is logged and doesn't affect the integration.
+
+Options that shape what is sent:
+
+- **Quiet hours**: between the start and end times (which may cross midnight), troubles and arm/disarm notices are skipped. **Alarms are always sent.**
+- **Only for these partitions**: for example `2`. Panel-wide events (partition 0) are always included. Blank means all.
+- **Repeat suppression**: the same trouble (a low battery that keeps reporting, say) is sent once in 6 hours. Its restoral is always sent and lets the next occurrence through. Alarms are never suppressed.
+- **Connection lost**: if the UNO connection is down for 5, 15, 30 or 60 minutes (default 5, or never), you get a message, and another when it is back. A recovery before then sends nothing. Because the app is what notifies you, an outage of the hub itself can't be reported.
+
+### Status device
+
+Switch on **Create a UNO Status device** (it needs the `UNO Status` driver, which HPM lists as optional) for one device with `openZones`, `bypassedZones`, `troubleSummary` and `staleSensors`, handy for a dashboard tile. With a single partition the partition device also gets `openZones` and `bypassedZones`. The UNO doesn't say which partition a zone belongs to, so with several partitions the lists are panel-wide and stay on the status and connection devices.
+
+Set **Report sensors with no activity for this many days** to be told about zones that may have a dead sensor. It checks every day at 9:00, using each zone's `lastFault`. A zone that has never triggered is only reported once that many days have passed since you switched the check on, because there is no way to know how old its sensor is. A changed list is sent as a notification and is always shown on the status device.
+
 ## Attributes
 
 **Partition device**
@@ -179,6 +206,9 @@ With more than one partition, the message starts with the partition name. Contac
 | `lastArmedBy`, `lastArmedAt`, `lastDisarmedBy`, `lastDisarmedAt` | Who armed or disarmed this partition and when, from the UNO's Contact ID events (a user name, `user N`, or `the system`) |
 | `lastArmMode` | `stay` or `away`, from the last armed state |
 | `lastEvent`, `lastEventType` | The last event for this partition in words, and its type (see [Event descriptions](#event-descriptions)) |
+| `lastAlarmType`, `lastAlarmZone`, `lastAlarmAt` | The last alarm (not its restoral): for example `Burglary alarm`, `Front Door (zone 5)` (or `none` when the event has no zone) and when |
+| `openZones`, `bypassedZones` | Zones by name, or `none`. Only with a single partition (see [Status device](#status-device)) |
+| `lastKeypadSound` | Keypad beeps and tones, only when **Publish diagnostic events** is on |
 | `temperature`, `outsideTemperature` | Inside and outside temperature, when the UNO reports them (converted to the hub's temperature scale) |
 | `healthStatus` | `online` / `offline`, from the connection to the UNO |
 | `securityKeypad` | `disarmed`, `armed home`, `armed away`, `unknown` (the `SecurityKeypad` capability) |
@@ -186,11 +216,15 @@ With more than one partition, the message starts with the partition name. Contac
 
 Unrecognised or transitory panel states are reported as `busy`, as the TPI document recommends.
 
-**Zone device**: the capability attribute (`contact`, `motion`, `smoke`, `carbonMonoxide` or `water`), `zoneStateDigit` (`1` open/active, `0` closed), `lastFault` (when it last opened), `bypassed` (`true`/`false`), `tamper` (`detected`/`clear`, from the UNO's tamper events), `temperature` (wireless zones that report one) and `healthStatus` (`online`/`offline`).
+**Zone device**: the capability attribute (`contact`, `motion`, `smoke`, `carbonMonoxide` or `water`), `zoneStateDigit` (`1` open/active, `0` closed), `lastFault` (when it last opened), `bypassed` (`true`/`false`), `tamper` (`detected`/`clear`), `batteryStatus` (`ok`/`low`), `supervision` (`ok`/`lost`), `temperature` (wireless zones that report one) and `healthStatus` (`online`/`offline`). The tamper, battery and supervision attributes come from the UNO's Contact ID events (137/144/383, 384 and 381), so they only change for sensors that send them.
 
 **PGM device**: `lastTriggered` and `healthStatus`.
 
-**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastSystemMessage`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat` and `lastRawMessage` are published only when **Publish diagnostic events** is on.
+**Status device**: `openZones`, `bypassedZones`, `troubleSummary` (`none`, or the active troubles, labelled `P1: ...; P3: ...` when more than one partition has any), `staleSensors` and `healthStatus`.
+
+**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `openZones`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
+
+`zoneTimers` is JSON from the last `dumpZoneTimers`: for each zone with a timer, `"open"` or the seconds since it closed, for example `{"1":"open","2":5,"4":327625}`. The UNO's timers tick every 5 seconds and forget a zone after about 3.8 days, so older zones are left out.
 
 `connectionState` is one of `connecting`, `connected`, `loginPrompt`, `authenticated`, `auth_failed`, `loginTimedOut`, `error` or `disconnected`. `lastAck` shows `error:<command>:<code>` when the panel rejects a command, `timeout:<command>` when it never answers, `rejected:<command>:code` when a required arming code was missing or wrong, and `dropped:<command>` when a command was discarded instead of run late.
 
@@ -207,7 +241,7 @@ Zone names come from the zone devices' labels, and user names from the **User na
 `lastEventType` (and the `unoEvent` category) is one of `arm`, `disarm`, `alarm`, `trouble`, `supervisory`, `bypass`, `access`, `exception`, `test` or `other`.
 
 - **Arm / disarm:** an opening (qualifier 1) is a disarm and a closing (qualifier 3) is an arm, matching the example in the TPI document (`3441010020`: closing, armed stay, partition 1, user 2). The arm *mode* comes from the partition state and is kept in `lastArmMode`.
-- **History:** the `eventHistory` attribute holds the newest 10 events as JSON (`at`, `partition`, `code`, `type`, `text`), newest first; the last 25 are kept in the device's state. Use `clearEventHistory` to empty it.
+- **History:** the `eventHistory` attribute holds the newest 10 events as JSON (`at`, `partition`, `code`, `type`, `text`), newest first. The last 25 are kept in the driver's memory rather than the hub database, so after a hub restart only the 10 in the attribute are remembered. Use `clearEventHistory` to empty it.
 - **Alarm restorals** are described as `... restored`.
 - **Who:** the last field of an arm or access event is a user number. User 0 is shown as `the system`.
 
@@ -227,9 +261,10 @@ See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/examp
 ## Connection behaviour
 
 - **Login:** the password is sent once, followed by a CR, when the UNO shows its `Login` prompt. It is never sent again while logged in, because outside a `^...$` packet the TPI would read digits as keypad presses.
-- **Heartbeat:** a poll every 1, 5 or 10 minutes (your setting) proves the link is alive.
+- **Heartbeat:** a poll every 1, 5 or 10 minutes (your setting) proves the link is alive. One schedule that runs every minute drives both the heartbeat and the watchdog.
 - **Watchdog:** the connection is dropped and re-opened if no frames arrive for the time you choose (3, 5 or 10 minutes, never shorter than the heartbeat plus one minute). It also reconnects if the connection has not authenticated for 2 minutes.
-- **Reconnect delays:** exponential, 2, 4, 8 and so on up to 128 seconds, for a dropped socket, a failed connect or a login timeout. The delay starts over once a connection has stayed up for 2 minutes, or when you save the app. After the UNO rejects the password it waits 5 minutes (to avoid locking you out). Pressing **reconnect** or saving the app retries immediately.
+- **Reconnect delays:** exponential, 2, 4, 8 and so on up to 128 seconds, for a dropped socket, a failed connect or a login timeout. The delay starts over once a connection has stayed up for 2 minutes, or when the connection is restarted. After the UNO rejects the password it waits 5 minutes (to avoid locking you out). Pressing **reconnect** retries immediately.
+- **Saving the app:** pressing **Done** only restarts the connection when something it depends on changed (address, port, passwords, zone settings, heartbeat or watchdog) or the app was updated. Changing names, hints or notification options leaves the connection, and any queued command, alone; behaviour settings such as panic or diagnostic events are pushed without a restart. If devices were created or recreated, the UNO is asked to announce its state again, without reconnecting. Use **reconnect** on the connection device to force a restart.
 - **Commands and reconnects:** queued commands are discarded when the connection drops, reconnects or is re-initialised, and a command that has waited more than 30 seconds to be sent is discarded too. Each one is logged and recorded in `lastAck` as `dropped:<command>`, so an arm or disarm requested during an outage never fires minutes later. Resend it once the connection is back.
 - **No reply:** a command that gets no answer is re-sent once; if there is still none, the connection is reset.
 - **Health:** every device reports `healthStatus` `online` once the UNO has accepted the login. If the connection stays down for 30 seconds the devices go `offline`, so a brief reconnect doesn't flap them.
@@ -256,7 +291,7 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 |---|---|---|
 | 00 | Poll | Implemented (heartbeat, `poll`) |
 | 01 | Change default partition | Not implemented (not needed: commands carry their partition) |
-| 02 | Dump zone timers | Not implemented |
+| 02 | Dump zone timers | Implemented (`dumpZoneTimers`) |
 | 03 | Keypress to a partition | Implemented (`sendKeys`) |
 | 04 / 05 | Bypass / un-bypass a zone | Implemented |
 | 06 / 07 | Bypass open zones / un-bypass all | Implemented |
@@ -280,16 +315,17 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 | 06 | Partition trouble | Implemented, all 8 partitions |
 | 07 | Zone temperatures | Implemented: the zone's `temperature` (a zero byte means no reading and is ignored) |
 | 08 | Partition temperatures | Implemented: the partition's `temperature` (inside) and `outsideTemperature` |
-| 09 / 0A | Keypad one-time / persistent sounds | Not implemented (keypad emulation only) |
+| 09 / 0A | Keypad one-time / persistent sounds | Implemented as `lastKeypadSound`, only with diagnostic events on (they are not decoded into a sound output) |
 | 10 | Partition chime | Implemented (`lastChime`) |
-| FF | Zone timer dump | Not implemented |
+| FF | Zone timer dump | Implemented (the `zoneTimers` attribute) |
 
 **Response codes (section 3.7):** every code is reported. Code 1 (receive buffer overrun, meaning the panel was busy and did not run the command) is retried after 1, 2 and 4 seconds before it is reported as a failure. The other error codes are not retried.
 
 **Interpretation notes**
 - The trouble bitfield's BIT 1-8 are read as the low-to-high bits of each partition's byte.
 - The spec describes the disarm code as "4 or 6 digits" in the text and "4-6" in the data column; 4 to 6 digits are accepted.
-- Tamper CID codes (137, 144, 383) set the zone's `tamper` attribute and do not open or close it; the spec doesn't define them. If the UNO also shows a tampered zone as open in the zone bitmap, the zone will still read open.
+- Tamper CID codes (137, 144, 383) set the zone's `tamper` attribute and do not open or close it; the spec doesn't define them. If the UNO also shows a tampered zone as open in the zone bitmap, the zone will still read open. Likewise 384 sets `batteryStatus` and 381 sets `supervision`.
+- Zone timers: a word of `FFFF` is open, each lower value is one 5 second tick since it closed, and `0000` is forgotten (spec 3.3, command FF).
 - The TPI document does not list the Contact ID codes. The descriptions follow the standard Contact ID code list, and which codes the UNO actually sends has only been checked against the one example in the document.
 
 ## Known limitations
@@ -297,6 +333,10 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 - One UNO per hub.
 - The UNO does not report door chime state, so `chime` only reflects the last command accepted.
 - A disarm code (or key presses) waiting in the command queue is held in the connection driver's memory, never in device state. If the hub restarts while a command is queued, the command is dropped with a warning.
+- The event history list (25 entries) lives in memory too; only the newest 10 survive a hub restart, in the `eventHistory` attribute.
+- All UNO drivers and the app should be updated together: the connection driver now tells each zone driver its state with one call, and a zone driver from an older version logs a warning and stops updating.
+- The UNO doesn't say which partition a zone belongs to, so `openZones` and `bypassedZones` are panel-wide.
+- Arm with bypass sends the bypass and then the arm as two commands; whether the UNO accepts the arm immediately afterwards has not been tried on a real panel.
 - The UNO reports no PGM state, so PGM devices are buttons only.
 - Nothing here has been run on a real hub yet; the tests use a mock Hubitat runtime.
 - Hubitat apps can't share code with drivers, so the range parser exists in both the app and the connection driver. A test keeps them identical.

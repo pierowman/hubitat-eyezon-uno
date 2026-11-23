@@ -34,9 +34,17 @@ metadata {
         attribute "lastDisarmedAt", "string"
         attribute "lastArmMode", "string"
         attribute "outsideTemperature", "number"
+        attribute "lastAlarmType", "string"
+        attribute "lastAlarmZone", "string"
+        attribute "lastAlarmAt", "string"
+        attribute "lastKeypadSound", "string"
+        attribute "openZones", "string"
+        attribute "bypassedZones", "string"
         attribute "healthStatus", "enum", ["online", "offline"]
         command "armStay"
         command "armAway"
+        command "armStayBypass", [[name: "Code (only if arming requires one)", type: "STRING"]]
+        command "armAwayBypass", [[name: "Code (only if arming requires one)", type: "STRING"]]
         command "armStayWithCode", [[name: "Code", type: "STRING"]]
         command "armAwayWithCode", [[name: "Code", type: "STRING"]]
         command "disarm", [[name: "Code", type: "STRING"]]
@@ -83,6 +91,10 @@ def ping() { parent?.refreshAll() }
 def armStay() { parent?.armStay(partitionNumber()); sendEvent(name: "lastUserAction", value: "armStay", isStateChange: true) }
 def armStayWithCode(String code) { parent?.armStay(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armStay", isStateChange: true) }
 def armAwayWithCode(String code) { parent?.armAway(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armAway", isStateChange: true) }
+
+// Bypasses whatever is open, then arms.
+def armStayBypass(String code = null) { parent?.armStayBypass(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armStayBypass", isStateChange: true) }
+def armAwayBypass(String code = null) { parent?.armAwayBypass(partitionNumber(), code); sendEvent(name: "lastUserAction", value: "armAwayBypass", isStateChange: true) }
 
 // SecurityKeypad / HSM entry points. HSM passes a delay and can send the same request twice, so a request
 // for the state the partition is already in is skipped. Night is mapped to stay because the UNO has no night mode.

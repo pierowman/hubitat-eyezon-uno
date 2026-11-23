@@ -63,6 +63,21 @@ class MockChild {
     def currentValue(String attr) { last(attr) }
     def methodMissing(String name, args) { calls << name; callArgs << [name, args as List]; return null }
     def last(String attr) { events.reverse().find { it.name == attr }?.value }
+
+    // Mirrors what the real zone drivers do with applyZoneState (those are tested in 40_child_drivers).
+    List applied = []
+    void applyZoneState(def active) {
+        applied << active
+        boolean on = active == true
+        sendEvent(name: "zoneStateDigit", value: on ? "1" : "0", isStateChange: true)
+        if (on) sendEvent(name: "lastFault", value: "2026-01-01 00:00:00", isStateChange: true)
+        Map byCap = [ContactSensor: ["contact", "open", "closed"], MotionSensor: ["motion", "active", "inactive"],
+                     SmokeDetector: ["smoke", "detected", "clear"], CarbonMonoxideDetector: ["carbonMonoxide", "detected", "clear"],
+                     WaterSensor: ["water", "wet", "dry"]]
+        byCap.each { String cap, List v ->
+            if (caps.contains(cap)) sendEvent(name: v[0], value: on ? v[1] : v[2], type: "physical", isStateChange: true)
+        }
+    }
 }
 
 // The app as seen by the drivers (their `parent`).
@@ -162,6 +177,7 @@ abstract class HubBase extends Script {
     void sendEvent(Map e) { events << e; currentVals[e.name] = e.value }
     void sendLocationEvent(Map e) { locationEvents << e }
     void runIn(Integer s, String h, Map o = null) { pending[h] = s; scheduleCalls << [h, s] }
+    void schedule(String cron, String h) { scheduleCalls << [h, cron] }
     void unschedule() { pending.clear(); unscheduleCalls << "*" }
     void unschedule(String h) { pending.remove(h); unscheduleCalls << h }
     def methodMissing(String name, Object args) {
