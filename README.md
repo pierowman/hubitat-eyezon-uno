@@ -218,7 +218,8 @@ Set **Report sensors with no activity for this many days** to be told about zone
 | `chime`, `lastChime` | `chime` is the last accepted `chimeOn`/`chimeOff` (the UNO doesn't report chime state); `lastChime` is the type of the last chime frame |
 | `lastUserAction` | The last command issued from this device |
 | `lastArmedBy`, `lastArmedAt`, `lastDisarmedBy`, `lastDisarmedAt` | Who armed or disarmed this partition and when, from the UNO's Contact ID events (a user name, `user N`, or `the system`) |
-| `lastArmMode` | `stay` or `away`, from the last armed state |
+| `lastArmMode` | `stay` or `away`, from the last **completed** arm. During an exit delay it still holds the previous arm's mode, so use `armingMode` then |
+| `armingMode` | During an exit delay: `stay` or `away` if the arm was requested by this integration (or announced as a stay arm by the UNO), otherwise `unknown`. `none` at any other time. The UNO's exit-delay state doesn't say which mode it is, so without this a dashboard would show the previous arm's mode until the delay ended |
 | `lastEvent`, `lastEventType` | The last event for this partition in words, and its type (see [Event descriptions](#event-descriptions)) |
 | `lastAlarmType`, `lastAlarmZone`, `lastAlarmAt` | The last alarm (not its restoral): for example `Burglary alarm`, `Front Door (zone 5)` (or `none` when the event has no zone) and when |
 | `openZones`, `bypassedZones` | Zones by name, or `none`. With one partition and no assignments, every zone; with [Zones per partition](#zones-per-partition), that partition's zones; otherwise not set (see [Status device](#status-device)) |

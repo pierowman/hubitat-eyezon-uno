@@ -133,6 +133,7 @@ def initialize() {
     state.lastZoneBitmap = null
     state.lastPartitionBitmap = null
     state.partitionStatus = [:]
+    state.armRequests = [:]
     state.troubleBytes = [:]
     state.zoneTemps = [:]
     state.partitionTemps = [:]
@@ -1283,6 +1284,9 @@ private void parseAckFrame(String frame) {
         // No state comes back for a PGM, so the best we can say is when the panel last accepted a trigger.
         parent?.notifyPgmEvents(inflight.pgm as Integer, [[name: "lastTriggered", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone), isStateChange: true]])
     }
+    if (code == 0 && (inflight.name == "armStay" || inflight.name == "armAway")) {
+        noteArmRequest(safeInt(inflight.data, 1), inflight.name == "armStay" ? "stay" : "away")
+    }
     releaseSecret(inflight)
     state.commandInFlight = null
 
@@ -1427,6 +1431,46 @@ private String zoneList(List<Integer> zones, String bitmap) {
     return names ? names.join(", ") : "none"
 }
 
+// While the UNO counts down an exit delay it doesn't say whether the arm is stay or away (spec 3.4 has one
+// "exit delay" state). A dashboard that read the previous arm's mode would show the wrong one for the whole delay,
+// so armingMode says what was requested (by our own arm command, or a stay-arm Contact ID event), or "unknown"
+// when someone armed from a keypad, and "none" outside an exit delay.
+private void noteArmRequest(Integer partition, String mode) {
+    String current = (state.partitionStatus instanceof Map) ? state.partitionStatus["${partition}"] : null
+    // If the arm has already finished (the acknowledgement came after the state change) there is nothing to colour.
+    if (current in ["armedStay", "armedAway", "armedAwayZeroEntry"]) return
+
+    Map requests = (state.armRequests instanceof Map) ? state.armRequests : [:]
+    requests["${partition}"] = "${mode}|${now()}".toString()
+    state.armRequests = requests
+    // The request can be confirmed after the exit delay has already started.
+    if (current == "exitDelay") publishArmingMode(partition, "exitDelay")
+}
+
+private void consumeArmRequest(Integer partition) {
+    // remove() needs a real String: a GString has a different hash code and would never match the key.
+    if (state.armRequests instanceof Map) state.armRequests.remove(partition.toString())
+}
+
+private String requestedArmMode(Integer partition) {
+    String value = (state.armRequests instanceof Map) ? state.armRequests["${partition}"] : null
+    if (!value || !value.contains("|")) return "unknown"
+    List<String> bits = value.split("\\|") as List<String>
+    long at = 0L
+    try { at = Long.parseLong(bits[1]) } catch (ignored) { }
+    // An exit delay can run for minutes; an older request belongs to some earlier arm.
+    return (now() - at) <= 300000L ? bits[0] : "unknown"
+}
+
+private void publishArmingMode(Integer partition, String status) {
+    String mode = status == "exitDelay" ? requestedArmMode(partition) : "none"
+    try {
+        parent?.notifyPartitionEvents(partition, [[name: "armingMode", value: mode]])
+    } catch (e) {
+        logDebug("Failed to forward the arming mode to partition ${partition}: ${e}")
+    }
+}
+
 // %02 carries one status byte per partition (partition 1 first). Only changes are forwarded.
 private void handlePartitionFrame(List<String> parts) {
     if (parts.size() < 2) return
@@ -1442,9 +1486,14 @@ private void handlePartitionFrame(List<String> parts) {
     for (int idx = 0; idx < 8 && (idx * 2 + 2) <= bitmap.length(); idx++) {
         Integer partition = idx + 1
         String status = decodePartitionStatus(bitmap.substring(idx * 2, idx * 2 + 2))
-        if (status == state.partitionStatus["${partition}"]) continue
+        String before = state.partitionStatus["${partition}"]
+        if (status == before) continue
 
         state.partitionStatus["${partition}"] = status
+        // The exit delay doesn't say whether it is stay or away; say what was asked for, or that it isn't known.
+        if (status == "exitDelay" || before == "exitDelay") publishArmingMode(partition, status)
+        // A request belongs to one arm: once that arm has finished (or been cancelled) it must not colour the next.
+        if (status != "exitDelay") consumeArmRequest(partition)
         if (partition == 1 && status != device.currentValue("alarmSystemStatus")) {
             sendEvent(name: "alarmSystemStatus", value: status)
             logInfo("Alarm status -> ${status}")
@@ -1497,6 +1546,9 @@ private void handleCidEvent(List<String> parts) {
     state.lastCidEvent = summary
     sendEvent(name: "lastCidEvent", value: summary.take(1024))
     logDebug(summary)
+
+    // "Armed stay" (441, 442) tells us the mode of an arm that didn't come from one of our commands (a keypad).
+    if (qualifier == "3" && eventCode in ["441", "442"] && partition >= 1 && partition <= 8) noteArmRequest(partition, "stay")
 
     // Describe it in plain words (who armed, which sensor alarmed, and so on) without affecting the zone fast path.
     try {

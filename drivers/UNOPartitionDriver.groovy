@@ -33,6 +33,7 @@ metadata {
         attribute "lastDisarmedBy", "string"
         attribute "lastDisarmedAt", "string"
         attribute "lastArmMode", "string"
+        attribute "armingMode", "enum", ["none", "stay", "away", "unknown"]
         attribute "outsideTemperature", "number"
         attribute "lastAlarmType", "string"
         attribute "lastAlarmZone", "string"
@@ -69,6 +70,7 @@ def installed() {
     sendEvent(name: "securitySystemStatus", value: "unknown")
     sendEvent(name: "alarm", value: "off")
     sendEvent(name: "securityKeypad", value: "unknown")
+    sendEvent(name: "armingMode", value: "none")
     sendKeypadDefaults()
 }
 
