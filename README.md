@@ -10,6 +10,8 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 
 > **Heads up:** section 2.1 of the TPI document says the UNO accepts only one client on port 4025 (section 2.3 mentions up to 8 sessions, so the document disagrees with itself). If another system such as Home Assistant is already connected and the UNO refuses this integration, disconnect the other client first.
 
+> **Firmware:** the TPI document (v1.08) lists a minimum UNO firmware of **1.0.154**. Older firmware may lack commands or frames this integration uses.
+
 ## Features
 
 **Alarm control**
@@ -357,7 +359,7 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 | 08 / 09 | Stay-arm / away-arm | Implemented, all partitions |
 | 0A | Toggle / activate a PGM output (1-14) | Implemented (`triggerPgm`, `UNO PGM` devices) |
 | 0C | Initial state dump | Implemented (on login and `refreshAll`) |
-| 0D | Request host information | Not sent; the UNO sends it after login and with each poll |
+| 0D | Request host information | Implemented: sent after login (once the state dump is acknowledged), so the panel model, firmware and MAC are known straight away. The UNO also sends it with each poll |
 | 10 | Door chime on/off | Implemented |
 | 11 | Panic alarm | Implemented, opt-in |
 | 12 | Disarm with code | Implemented, all partitions |

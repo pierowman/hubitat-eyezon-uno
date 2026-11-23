@@ -96,9 +96,9 @@ metadata {
     preferences {
         input name: "ip", type: "text", title: "UNO IP Address", required: true
         input name: "port", type: "number", title: "UNO Port", defaultValue: 4025, required: true
-        input name: "password", type: "text", title: "UNO TPI Password", required: true
+        input name: "password", type: "password", title: "UNO TPI Password", required: true
         input name: "restUsername", type: "text", title: "UNO REST Username", defaultValue: "user", required: false
-        input name: "masterCode", type: "text", title: "UNO Master Code", required: false
+        input name: "masterCode", type: "password", title: "UNO Master Code", required: false
         input name: "zoneCount", type: "number", title: "Configured Zone Count", defaultValue: 27, required: true
         input name: "zoneSet", type: "text", title: "Zone set (optional, e.g. 1-8,12,20-27; overrides zone count)", required: false
         input name: "enablePanic", type: "bool", title: "Allow panic commands (contacts emergency services if the UNO is monitored)", defaultValue: false
@@ -258,13 +258,18 @@ private boolean reconnectPending() {
     return ((state.reconnectDueAt ?: 0L) as Long) > now()
 }
 
+// Words that mean the connection is gone or could not be made.
+@Field static final List<String> SOCKET_FAILURE_WORDS = ["close", "disconnect", "error", "fail", "exception", "refused", "reset", "timeout",
+                                                         "timed out", "unreachable", "no route", "unknown host", "broken pipe", "abort", "eof", "denied"]
+
 def socketStatus(String message) {
     logDebug("socketStatus: ${message}")
 
     String m = (message ?: "").toLowerCase()
 
-    // Check failure words first: "disconnected" and "failed to connect" both contain "connect".
-    if (m.contains("close") || m.contains("disconnect") || m.contains("error") || m.contains("fail")) {
+    // Check failure words first: "disconnected" and "failed to connect" both contain "connect". The hub's own
+    // messages usually say "error" or "status: closed", but a Java exception text can arrive as it is.
+    if (SOCKET_FAILURE_WORDS.any { String w -> m.contains(w) }) {
         logWarn("Socket disconnected: ${message}")
         if (!state.authFailed) {
             sendEvent(name: "connectionState", value: "disconnected")
@@ -1041,8 +1046,10 @@ private void parseFrame(String frame) {
             }
         }
 
-        // The panel sends host information (%05) on its own after login, so only request the state dump.
+        // The panel sends host information (%05) on its own with each poll, but asking now means the model, firmware
+        // and MAC are known straight away rather than at the first poll (which can be 10 minutes away).
         enqueueCommand("0C", "", "refreshAll")
+        enqueueCommand("0D", "", "hostInfo")
         processQueue()
         return
     }

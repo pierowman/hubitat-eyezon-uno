@@ -186,3 +186,23 @@ k.section("The login-timeout handler can't be the thing that breaks recovery") {
     }
     k.check("socketStatus(null) never throws either", { try { socketTimeout.socketStatus(null); true } catch (Throwable t) { false } }())
 }
+
+// Probe: how socketStatus reads messages the hub might deliver (kept as a test if it passes).
+k.section("socketStatus: failures are recognised whatever the wording") {
+    def failures = ["java.net.ConnectException: Connection refused", "java.net.SocketTimeoutException: connect timed out", "java.net.NoRouteToHostException: No route to host",
+                    "Connection reset by peer", "java.io.IOException: Broken pipe", "java.net.UnknownHostException: uno.local", "Network is unreachable",
+                    "receive error: Stream closed.", "send error: Broken pipe", "status: closed", "java.io.EOFException", "Read timed out", "Connection timed out", "Software caused connection abort"]
+    failures.each { String msg ->
+        def d = k.newConn()
+        d.initialize()
+        d.pending.remove("reconnect")
+        d.socketStatus(msg)
+        k.check("'${msg}' schedules a reconnect and doesn't claim a connection", d.pending.containsKey("reconnect") && d.lastAttr("connectionState") != "connected", [d.lastAttr("connectionState"), d.pending])
+    }
+    ["status: open", "status: Connected"].each { String msg ->
+        def d = k.newConn()
+        d.initialize()
+        d.socketStatus(msg)
+        k.check("'${msg}' is a connection", d.lastAttr("connectionState") == "connected")
+    }
+}

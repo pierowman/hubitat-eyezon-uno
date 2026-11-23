@@ -378,6 +378,7 @@ k.section("Secrets are kept out of trace logs") {
     def d = k.newConn(traceLogging: true, password: "s3cretpw", masterCode: "9876")
     d.initialize(); d.parse(k.hex("Login:")); d.parse(k.hex("OK\r\n"))
     k.ack(d, "0C")
+    k.ack(d, "0D")
     d.disarm("1234")
     d.sendKeys("5678", 1)
     k.ack(d, "12")

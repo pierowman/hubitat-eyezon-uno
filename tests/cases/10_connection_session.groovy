@@ -14,8 +14,11 @@ k.section("Login handshake") {
     d.parse(k.hex("OK\r\n"))
     k.check("OK => authenticated", d.lastAttr("connectionState") == "authenticated")
     k.check("state dump ^0C,\$ requested with CRLF", d.sent.contains("^0C,\$\r\n"), d.sent)
-    k.check("no separate ^0D request (panel sends host info itself)", !d.sent.any { it.startsWith("^0D") }, d.sent)
+    k.check("host information (^0D) is not sent until the dump has been acknowledged", !d.sent.any { it.startsWith("^0D") }, d.sent)
     d.parse(k.hex("^0C,0\$\r\n"))
+    k.check("then it is requested, so the model, firmware and MAC are known without waiting for a poll", d.sent.contains("^0D,\$\r\n"), d.sent)
+    k.check("the dump's acknowledgement doesn't free the queue for anything else yet", d.state.commandInFlight?.name == "hostInfo", d.state.commandInFlight)
+    d.parse(k.hex("^0D,0\$\r\n"))
     k.check("matching ack clears in-flight", d.state.commandInFlight == null)
 }
 

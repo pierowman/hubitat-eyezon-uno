@@ -61,6 +61,7 @@ k.section("Online / offline health") {
     k.check("checkInterval follows the heartbeat", n.lastAttr("checkInterval") == "120", n.lastAttr("checkInterval"))
 
     k.ack(d, "0C")
+    k.ack(d, "0D")
     d.ping()
     k.check("ping asks the panel for a poll", d.sent.last() == "^00,\$\r\n", d.sent)
 }

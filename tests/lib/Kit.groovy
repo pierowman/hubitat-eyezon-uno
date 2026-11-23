@@ -68,12 +68,13 @@ class Kit {
         d.parse(hex("OK\r\n"))
     }
 
-    // A connection driver that has already logged in, with the login traffic cleared.
+    // A connection driver that has already logged in, with the login traffic (and whatever it queued) cleared.
     HubBase authed(Map over = [:]) {
         def d = newConn(over)
         login(d)
         d.sent.clear()
         d.state.commandInFlight = null
+        d.state.commandQueue = []
         return d
     }
 

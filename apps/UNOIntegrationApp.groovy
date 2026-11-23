@@ -23,9 +23,9 @@ def mainPage() {
         section("UNO Connection") {
             input "ip", "text", title: "UNO IP Address", required: true
             input "port", "number", title: "UNO Port", defaultValue: 4025, required: true
-            input "password", "text", title: "UNO Local/TPI Password", required: true
+            input "password", "password", title: "UNO Local/TPI Password", required: true
             input "restUsername", "text", title: "UNO REST Username", defaultValue: "user", required: false
-            input "masterCode", "text", title: "Master Code (optional, for disarm)", required: false
+            input "masterCode", "password", title: "Master Code (optional, for disarm)", required: false
         }
 
         section("Partitions") {
@@ -391,9 +391,9 @@ private List<String> applyConnectionSettings() {
     Map desired = [
         ip              : [settings.ip, "text"],
         port            : ["${settings.port ?: 4025}", "number"],
-        password        : [settings.password, "text"],
+        password        : [settings.password, "password"],
         restUsername    : [settings.restUsername ?: "user", "text"],
-        masterCode      : [settings.masterCode ?: "", "text"],
+        masterCode      : [settings.masterCode ?: "", "password"],
         zoneCount       : ["${safeInt(settings.zoneCount, 27)}", "number"],
         zoneSet         : [settings.zoneSet ?: "", "text"],
         enablePanic     : [settings.enablePanic == true, "bool"],
