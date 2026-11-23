@@ -28,6 +28,7 @@ The exit code is non-zero if anything fails. The same command runs in GitHub Act
 | `cases/00_static.groovy` | Every file compiles, no undefined calls, manifests valid and complete |
 | `cases/10_connection_session.groovy` | Login, reconnect, back-off, watchdog, frame robustness |
 | `cases/20_connection_frames.groovy` | Frames from the UNO: zones, partitions, trouble, bypass, CID, host info, chime |
+| `cases/25_connection_events.groovy` | Contact ID semantics: who armed or disarmed, alarm and trouble text, history, `unoEvent` |
 | `cases/30_connection_commands.groovy` | Commands to the UNO: queue and acks, arm, disarm, bypass, keypress, panic, REST sync |
 | `cases/40_child_drivers.groovy` | Partition and zone drivers |
 | `cases/50_app.groovy` | Device creation, hints, partitions, zone sets, forwarding, setup checks |

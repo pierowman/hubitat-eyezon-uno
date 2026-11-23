@@ -198,6 +198,27 @@ k.section("REST status and setup checks") {
             summary.contains("Connection: authenticated") && summary.contains("UNO, firmware 01.00.117, MAC 001C2A45F894") && summary.contains("REST: disabled"), summary)
 }
 
+k.section("User names and zone names for event text") {
+    def (a, env) = k.newApp([zoneCount: 3, userNames: "2:Alice\n# comment\nbad line\n3 : Bob \n0:Nobody", zoneHints: "2:Front Door:contact"])
+    a.initialize()
+    k.check("a named user is found", a.userName(2) == "Alice", a.userName(2))
+    k.check("spaces around the number and name are ignored", a.userName(3) == "Bob", a.userName(3))
+    k.check("an unnamed user has no name", a.userName(4) == null)
+    k.check("comments and bad lines are ignored", a.state.userNamesMap.keySet().sort() == ["0", "2", "3"], a.state.userNamesMap)
+
+    k.check("a zone with a real label is named", a.zoneName(2) == "Front Door", a.zoneName(2))
+    k.check("a zone that still has its default label has no name", a.zoneName(1) == null, a.zoneName(1))
+    k.check("a zone with no device has no name", a.zoneName(99) == null)
+
+    a.settings.userNames = "2:Carol"
+    a.updated()
+    k.check("changing the names takes effect on update", a.userName(2) == "Carol" && a.userName(3) == null)
+
+    def (b, envB) = k.newApp([zoneCount: 1])
+    b.initialize()
+    k.check("no names configured is fine", b.userName(1) == null)
+}
+
 k.section("Zone name inference") {
     def (a, env) = k.newApp([zoneCount: 1])
     Map cases = ["Kitchen CO": "co", "Dining Room PIR": "motion", "Attic Heat": "smoke", "Basement Leak": "water",

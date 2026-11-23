@@ -23,6 +23,13 @@ metadata {
         attribute "supervisoryFault", "string"
         attribute "chime", "string"
         attribute "lastChime", "string"
+        attribute "lastEvent", "string"
+        attribute "lastEventType", "string"
+        attribute "lastArmedBy", "string"
+        attribute "lastArmedAt", "string"
+        attribute "lastDisarmedBy", "string"
+        attribute "lastDisarmedAt", "string"
+        attribute "lastArmMode", "string"
         command "armStay"
         command "armAway"
         command "armStayWithCode", [[name: "Code", type: "STRING"]]
@@ -139,6 +146,10 @@ def setAlarmState(String state) {
     sendEvent(name: "securitySystemStatus", value: mapSecurityState(value), isStateChange: true)
     sendEvent(name: "alarm", value: mapAlarmCapability(value), isStateChange: true)
     sendEvent(name: "ready", value: (value in ["disarmed", "readyBypassed"]) ? "true" : "false")
+
+    // How it was last armed comes from the partition state; who did it comes from the Contact ID event.
+    if (value == "armedStay") sendEvent(name: "lastArmMode", value: "stay")
+    if (value in ["armedAway", "armedAwayZeroEntry"]) sendEvent(name: "lastArmMode", value: "away")
 
     // Delays, alarms and busy states have no SecurityKeypad equivalent, so the last stable value is kept.
     String keypad = mapKeypadState(value)

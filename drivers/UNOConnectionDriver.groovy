@@ -1,3 +1,6 @@
+import groovy.json.JsonOutput
+import groovy.transform.Field
+
 metadata {
     definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess") {
         capability "Initialize"
@@ -30,6 +33,9 @@ metadata {
         attribute "zoneBitmapLength", "number"
         attribute "lastHeartbeat", "string"
         attribute "lastCidEvent", "string"
+        attribute "lastEvent", "string"
+        attribute "lastEventType", "string"
+        attribute "eventHistory", "string"
         attribute "restStartupSync", "string"
 
         command "armStay"
@@ -47,6 +53,7 @@ metadata {
         command "refreshAll"
         command "login"
         command "clearCommandQueue"
+        command "clearEventHistory"
         command "poll"
         command "restStartupSync"
     }
@@ -110,6 +117,7 @@ def initialize() {
     sendEvent(name: "connectionState", value: "disconnected")
     if (!device.currentValue("alarmSystemStatus")) sendEvent(name: "alarmSystemStatus", value: "unknown")
     if (!device.currentValue("troubleState")) sendEvent(name: "troubleState", value: "unknown")
+    if (device.currentValue("eventHistory") == null) sendEvent(name: "eventHistory", value: "[]")
 
     scheduleHealthChecks()
     reconnect()
@@ -1146,6 +1154,13 @@ private void handleCidEvent(List<String> parts) {
     sendEvent(name: "lastCidEvent", value: summary.take(1024))
     logDebug(summary)
 
+    // Describe it in plain words (who armed, which sensor alarmed, and so on) without affecting the zone fast path.
+    try {
+        publishCidEvent(qualifier, eventCode, partition, zone)
+    } catch (Exception e) {
+        logWarn("Could not describe CID event ${eventCode}: ${e}")
+    }
+
     if (zone <= 0 || !configuredZones().contains(zone)) return
 
     Set<String> fastPathZoneCodes = [
@@ -1179,6 +1194,206 @@ private String suggestTypeFromCid(String eventCode) {
         default:
             return null
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Contact ID semantics: turn "%03" events into readable text, history and per-partition attributes.
+// Qualifier 1 is the event (or opening / disarm) and 3 is the restoral (or closing / arm). The last field
+// is a zone for alarms and sensor troubles, and a user number for open/close and access events.
+// ---------------------------------------------------------------------------------------------
+
+// code -> [category, description]
+@Field static final Map CID_EVENTS = [
+    // Medical, fire, panic, burglary and environmental alarms
+    "100": ["alarm", "Medical alarm"], "101": ["alarm", "Personal emergency"], "102": ["alarm", "Failure to report in"],
+    "110": ["alarm", "Fire alarm"], "111": ["alarm", "Smoke alarm"], "112": ["alarm", "Combustion alarm"],
+    "113": ["alarm", "Water flow alarm"], "114": ["alarm", "Heat alarm"], "115": ["alarm", "Pull station alarm"],
+    "116": ["alarm", "Duct alarm"], "117": ["alarm", "Flame alarm"], "118": ["alarm", "Near alarm"],
+    "120": ["alarm", "Panic alarm"], "121": ["alarm", "Duress"], "122": ["alarm", "Silent panic"], "123": ["alarm", "Audible panic"],
+    "130": ["alarm", "Burglary alarm"], "131": ["alarm", "Perimeter alarm"], "132": ["alarm", "Interior alarm"],
+    "133": ["alarm", "24 hour alarm"], "134": ["alarm", "Entry/exit alarm"], "135": ["alarm", "Day/night alarm"],
+    "136": ["alarm", "Outdoor alarm"], "137": ["alarm", "Tamper"], "138": ["alarm", "Near alarm"],
+    "139": ["alarm", "Intrusion verified"], "140": ["alarm", "General alarm"], "141": ["alarm", "Polling loop open"],
+    "142": ["alarm", "Polling loop short"], "143": ["alarm", "Expansion module failure"], "144": ["alarm", "Sensor tamper"],
+    "145": ["alarm", "Expansion module tamper"], "146": ["alarm", "Silent burglary"], "147": ["alarm", "Sensor supervision failure"],
+    "150": ["alarm", "24 hour non-burglary alarm"], "151": ["alarm", "Gas detected"], "152": ["alarm", "Refrigeration alarm"],
+    "153": ["alarm", "Loss of heat"], "154": ["alarm", "Water leakage"], "155": ["alarm", "Foil break"],
+    "156": ["alarm", "Day trouble"], "157": ["alarm", "Low bottled gas level"], "158": ["alarm", "High temperature"],
+    "159": ["alarm", "Low temperature"], "161": ["alarm", "Loss of air flow"], "162": ["alarm", "Carbon monoxide detected"],
+    "163": ["alarm", "Tank level"],
+    // Supervisory
+    "200": ["supervisory", "Fire supervisory"], "201": ["supervisory", "Low water pressure"], "202": ["supervisory", "Low CO2"],
+    "203": ["supervisory", "Gate valve sensor"], "204": ["supervisory", "Low water level"], "205": ["supervisory", "Pump activated"],
+    "206": ["supervisory", "Pump failure"],
+    // System and sensor troubles
+    "300": ["trouble", "System trouble"], "301": ["trouble", "AC power loss"], "302": ["trouble", "Low system battery"],
+    "303": ["trouble", "RAM checksum bad"], "304": ["trouble", "ROM checksum bad"], "305": ["trouble", "System reset"],
+    "306": ["trouble", "Panel programming changed"], "307": ["trouble", "Self-test failure"], "308": ["trouble", "System shutdown"],
+    "309": ["trouble", "Battery test failure"], "310": ["trouble", "Ground fault"], "311": ["trouble", "Battery missing or dead"],
+    "312": ["trouble", "Power supply overcurrent"], "313": ["trouble", "Engineer reset"],
+    "320": ["trouble", "Sounder or relay trouble"], "321": ["trouble", "Bell 1 trouble"], "322": ["trouble", "Bell 2 trouble"],
+    "330": ["trouble", "System peripheral trouble"], "333": ["trouble", "Expansion module failure"],
+    "350": ["trouble", "Communication trouble"], "351": ["trouble", "Telephone line 1 fault"], "352": ["trouble", "Telephone line 2 fault"],
+    "353": ["trouble", "Radio transmitter fault"], "354": ["trouble", "Failure to communicate"], "355": ["trouble", "Loss of radio supervision"],
+    "356": ["trouble", "Loss of central polling"],
+    "370": ["trouble", "Protection loop trouble"], "373": ["trouble", "Fire loop trouble"],
+    "380": ["trouble", "Sensor trouble"], "381": ["trouble", "Loss of supervision (RF)"], "383": ["trouble", "Sensor tamper trouble"],
+    "384": ["trouble", "Sensor low battery"], "389": ["trouble", "Sensor self-test failure"], "393": ["trouble", "Maintenance alert"],
+    // Open / close (arm and disarm), remote access and exceptions
+    "400": ["arm", "Open/close"], "401": ["arm", "Open/close by user"], "402": ["arm", "Group open/close"],
+    "403": ["arm", "Automatic open/close"], "407": ["arm", "Remote arm/disarm"], "408": ["arm", "Quick arm"],
+    "409": ["arm", "Keyswitch open/close"], "441": ["arm", "Armed stay"], "442": ["arm", "Keyswitch armed stay"],
+    "404": ["exception", "Late open/close"], "405": ["exception", "Deferred open/close"], "406": ["exception", "Cancel"],
+    "450": ["exception", "Exception open/close"], "451": ["exception", "Early open/close"], "452": ["exception", "Late open/close"],
+    "453": ["exception", "Failed to open"], "454": ["exception", "Failed to close"], "455": ["exception", "Auto-arm failed"],
+    "456": ["exception", "Partial arm"], "457": ["exception", "Exit error"], "458": ["exception", "User on premises"],
+    "459": ["exception", "Recent close"], "463": ["exception", "Re-arm after alarm"], "464": ["exception", "Auto-arm time extended"],
+    "465": ["exception", "Panic alarm reset"], "466": ["exception", "Service on/off premises"],
+    "411": ["access", "Callback request made"], "412": ["access", "Successful download/access"], "413": ["access", "Unsuccessful access"],
+    "414": ["access", "System shutdown"], "415": ["access", "Dialer shutdown"], "416": ["access", "Successful upload"],
+    "421": ["access", "Access denied"], "422": ["access", "Access report by user"],
+    "461": ["access", "Wrong code entered"], "462": ["access", "Valid code entered"],
+    // Bypass and disable
+    "520": ["bypass", "Sounder or relay disabled"], "551": ["bypass", "Dialer disabled"], "552": ["bypass", "Radio transmitter disabled"],
+    "570": ["bypass", "Zone bypassed"], "571": ["bypass", "Fire zone bypassed"], "572": ["bypass", "24 hour zone bypassed"],
+    "573": ["bypass", "Burglary zone bypassed"], "574": ["bypass", "Group bypass"],
+    // Tests
+    "601": ["test", "Manual test"], "602": ["test", "Periodic test"], "603": ["test", "Periodic RF transmission"],
+    "604": ["test", "Fire test"], "605": ["test", "Status report to follow"], "607": ["test", "Walk test mode"],
+    "608": ["test", "Periodic test (trouble present)"], "611": ["test", "Point tested OK"], "612": ["test", "Point not tested"],
+    "613": ["test", "Intrusion zone walk tested"], "614": ["test", "Fire zone walk tested"], "615": ["test", "Panic zone walk tested"],
+    "616": ["test", "Service request"]
+]
+
+// Codes where qualifier 3 (closing) means armed and 1 (opening) means disarmed, with a hint of how.
+@Field static final Map CID_ARM_SUFFIX = [
+    "400": "", "401": "", "402": " (group)", "403": " (automatic)", "407": " (remote)", "408": " (quick arm)",
+    "409": " (keyswitch)", "441": " (stay)", "442": " (keyswitch, stay)"
+]
+
+private String cidField(String code, String category) {
+    Integer n = safeParseInt(code, 0)
+    switch (category) {
+        case "alarm":
+        case "bypass":
+        case "supervisory":
+            return "zone"
+        case "trouble":
+            return (n >= 300 && n < 360) ? "none" : "zone"
+        case "access":
+        case "exception":
+            return "user"
+        case "test":
+            return (n >= 611 && n <= 615) ? "zone" : "none"
+        default:
+            return "none"
+    }
+}
+
+private String userLabel(Integer user) {
+    if (user == null || user <= 0) return "the system"
+    String name = null
+    try {
+        name = parent?.userName(user)
+    } catch (ignored) {
+    }
+    return name ?: "user ${user}"
+}
+
+private String zoneLabel(Integer zone) {
+    String name = null
+    try {
+        name = parent?.zoneName(zone)
+    } catch (ignored) {
+    }
+    return name ? "${name} (zone ${zone})" : "zone ${zone}"
+}
+
+// Returns [category, text, who]. Arm and disarm are their own categories so rules can react to them.
+private Map describeCid(String qualifier, String code, Integer zoneOrUser) {
+    boolean restore = (qualifier == "3")
+
+    if (CID_ARM_SUFFIX.containsKey(code)) {
+        boolean armed = restore
+        String suffix = (armed || !(code in ["441", "442"])) ? CID_ARM_SUFFIX[code] : ""
+        String who = userLabel(zoneOrUser)
+        return [category: armed ? "arm" : "disarm", text: "${armed ? 'Armed' : 'Disarmed'}${suffix} by ${who}".toString(), who: who]
+    }
+
+    List info = CID_EVENTS[code]
+    String category = info ? info[0] : "other"
+    String text = info ? info[1] : "Event ${code}"
+    String who = null
+
+    // Only alarm-like events have a meaningful "restored"; for the rest the qualifier just marks the other edge.
+    if (restore && category in ["alarm", "trouble", "bypass", "supervisory"]) text += " restored"
+
+    String field = cidField(code, category)
+    if (field == "zone" && zoneOrUser > 0) {
+        text += ": " + zoneLabel(zoneOrUser)
+    } else if (field == "user" && zoneOrUser > 0) {
+        who = userLabel(zoneOrUser)
+        text += " by ${who}"
+    }
+
+    return [category: category, text: text.toString(), who: who]
+}
+
+private void publishCidEvent(String qualifier, String code, Integer partition, Integer zoneOrUser) {
+    if (!(qualifier in ["1", "3"])) return
+
+    Map d = describeCid(qualifier, code, zoneOrUser)
+    String at = new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone)
+
+    sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
+    sendEvent(name: "lastEventType", value: d.category, isStateChange: true)
+    recordEventHistory([at: at, partition: partition, code: code, type: d.category, text: d.text])
+
+    try {
+        sendLocationEvent(
+            name: "unoEvent",
+            value: "${d.category}:${code}".toString(),
+            descriptionText: d.text,
+            isStateChange: true,
+            data: JsonOutput.toJson([partition: partition, code: code, qualifier: qualifier, category: d.category,
+                                      zoneOrUser: zoneOrUser, text: d.text])
+        )
+    } catch (e) {
+        logDebug("Failed to emit unoEvent for CID ${code}: ${e}")
+    }
+
+    if (partition < 1 || partition > 8) return
+
+    List events = [
+        [name: "lastEvent", value: d.text.take(255), isStateChange: true],
+        [name: "lastEventType", value: d.category, isStateChange: true]
+    ]
+    if (d.category == "arm") {
+        events << [name: "lastArmedBy", value: d.who, isStateChange: true] << [name: "lastArmedAt", value: at, isStateChange: true]
+    } else if (d.category == "disarm") {
+        events << [name: "lastDisarmedBy", value: d.who, isStateChange: true] << [name: "lastDisarmedAt", value: at, isStateChange: true]
+    }
+    parent?.notifyPartitionEvents(partition, events)
+}
+
+// Keeps the last 25 events in state and shows the newest 10 as JSON in the eventHistory attribute.
+private void recordEventHistory(Map entry) {
+    List history = (state.eventHistory instanceof List) ? state.eventHistory : []
+    history.add(0, entry)
+    while (history.size() > 25) history.remove(history.size() - 1)
+    state.eventHistory = history
+    publishEventHistory()
+}
+
+private void publishEventHistory() {
+    List recent = ((state.eventHistory instanceof List) ? state.eventHistory : []).take(10)
+    sendEvent(name: "eventHistory", value: recent ? JsonOutput.toJson(recent) : "[]")
+}
+
+def clearEventHistory() {
+    state.eventHistory = []
+    publishEventHistory()
+    logInfo("Cleared event history")
 }
 
 // %04 is a zone bitmap (same layout as %01) where a set bit means the zone is bypassed.

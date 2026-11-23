@@ -31,6 +31,9 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - CID fast-path for zone alarm events, ahead of the next zone bitmap
 
 **Monitoring and diagnostics**
+- Plain-language event descriptions from the UNO's Contact ID events: who armed or disarmed ("Armed by Alice"), which sensor alarmed, troubles and restorals
+- Event history (the last 10 events as JSON, 25 kept) and per-partition `lastArmedBy` / `lastDisarmedBy` with times
+- A location event `unoEvent` for every Contact ID event, for rules
 - Panel trouble decoding per partition (AC failure, low battery, server offline, zone trouble, siren fault and more)
 - Panel model, firmware, MAC address and time
 - Status section on the app page: connection state, panel details, and whether the REST credentials were accepted
@@ -72,6 +75,7 @@ Device network IDs are fixed, so existing rules and dashboards keep working acro
 | Zone set | e.g. `1-8,12,20-27`. When filled in it **replaces** Zone Count |
 | Default type for unknown zones | Used when a zone has no hint and its label doesn't suggest a type |
 | Zone Hints | One zone per line: `zoneNumber:Label:type` (`contact`, `motion`, `smoke`, `co`, `water`) |
+| User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
 | Allow panic commands | Off by default. See [Panic commands](#panic-commands) |
 | Debug / trace logging | Trace logs show the TPI traffic with passwords and codes masked |
 | Heartbeat interval / Reconnect if no frames seen for | See [Connection behaviour](#connection-behaviour) |
@@ -97,7 +101,7 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 | Connection | `bypassZone(zone)`, `unbypassZone(zone)` | Zone 1-128 |
 | Connection | `sendKeys(keys, partition)`, `panic(type, partition)` | For rules that address a partition by number |
 | Connection | `armStay`, `armAway`, `chimeOn`, `chimeOff`, `bypassOpenZones`, `unbypassAllZones` | Partition 1 from the device page |
-| Connection | `disarm`, `refreshAll`, `poll`, `reconnect`, `restStartupSync`, `clearCommandQueue` | Maintenance and manual control |
+| Connection | `disarm`, `refreshAll`, `poll`, `reconnect`, `restStartupSync`, `clearCommandQueue`, `clearEventHistory` | Maintenance and manual control |
 
 > **Warning:** the partition device uses Hubitat's `Alarm` capability, and its `off` command **disarms** the partition. Anything that turns the "alarm" off (a rule, a dashboard tile, a voice assistant) will disarm your system. `siren`, `strobe` and `both` do nothing.
 
@@ -137,6 +141,9 @@ Panic commands are disabled until you turn on **Allow panic commands** in the ap
 | `serviceRequired`, `acFailure`, `lowBattery`, `serverOffline`, `zoneTrouble`, `batteryOvercurrent`, `sirenFault`, `supervisoryFault` | `active` / `clear` |
 | `chime`, `lastChime` | `chime` is the last accepted `chimeOn`/`chimeOff` (the UNO doesn't report chime state); `lastChime` is the type of the last chime frame |
 | `lastUserAction` | The last command issued from this device |
+| `lastArmedBy`, `lastArmedAt`, `lastDisarmedBy`, `lastDisarmedAt` | Who armed or disarmed this partition and when, from the UNO's Contact ID events (a user name, `user N`, or `the system`) |
+| `lastArmMode` | `stay` or `away`, from the last armed state |
+| `lastEvent`, `lastEventType` | The last event for this partition in words, and its type (see [Event descriptions](#event-descriptions)) |
 | `securityKeypad` | `disarmed`, `armed home`, `armed away`, `unknown` (the `SecurityKeypad` capability) |
 | `codeLength`, `maxCodes`, `lockCodes` | Fixed `6`, `0` and `{}`: user codes are managed on the UNO |
 
@@ -144,15 +151,37 @@ Unrecognised or transitory panel states are reported as `busy`, as the TPI docum
 
 **Zone device**: the capability attribute (`contact`, `motion`, `smoke`, `carbonMonoxide` or `water`), `zoneStateDigit` (`1` open/active, `0` closed), `lastFault` (when it last opened) and `bypassed` (`true`/`false`).
 
-**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `panelTime`, `restStartupSync`, `lastCidEvent`, `lastHeartbeat`, `lastSystemMessage`, `lastRawMessage`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest).
+**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `panelTime`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastHeartbeat`, `lastSystemMessage`, `lastRawMessage`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest).
 
 `connectionState` is one of `connecting`, `connected`, `loginPrompt`, `authenticated`, `auth_failed`, `loginTimedOut`, `error` or `disconnected`. `lastAck` shows `error:<command>:<code>` when the panel rejects a command, `timeout:<command>` when it never answers, `rejected:<command>:code` when a required arming code was missing or wrong, and `dropped:<command>` when a command was discarded instead of run late.
+
+## Event descriptions
+
+The UNO reports what happens (an arm, an alarm, a trouble) as Contact ID events. The integration turns each one into a sentence, keeps a history, and publishes it, for example:
+
+- `Armed by Alice`, `Disarmed by user 3`, `Armed (automatic) by the system`, `Armed (stay) by user 2`
+- `Burglary alarm: Front Door (zone 5)`, `Burglary alarm restored: Front Door (zone 5)`
+- `AC power loss`, `Sensor low battery: zone 7`, `Zone bypassed: zone 3`, `Wrong code entered by user 4`
+
+Zone names come from the zone devices' labels, and user names from the **User names** setting. About 110 Contact ID codes are described; any other code is still reported as `Event 999` so nothing is hidden.
+
+`lastEventType` (and the `unoEvent` category) is one of `arm`, `disarm`, `alarm`, `trouble`, `supervisory`, `bypass`, `access`, `exception`, `test` or `other`.
+
+- **Arm / disarm:** an opening (qualifier 1) is a disarm and a closing (qualifier 3) is an arm, matching the example in the TPI document (`3441010020`: closing, armed stay, partition 1, user 2). The arm *mode* comes from the partition state and is kept in `lastArmMode`.
+- **History:** the `eventHistory` attribute holds the newest 10 events as JSON (`at`, `partition`, `code`, `type`, `text`), newest first; the last 25 are kept in the device's state. Use `clearEventHistory` to empty it.
+- **Alarm restorals** are described as `... restored`.
+- **Who:** the last field of an arm or access event is a user number. User 0 is shown as `the system`.
 
 ## Automations
 
 Zone changes are published as location events so rules can react immediately:
 
 - Event name `unoZoneEvent`, value `<zone>:open` or `<zone>:closed` (for example `17:open`)
+
+Every Contact ID event is also published as a location event, so a rule can react to who armed or what alarmed:
+
+- Event name `unoEvent`, value `<category>:<code>` (for example `arm:401`, `disarm:401`, `alarm:130`, `trouble:301`)
+- `descriptionText` is the sentence, and `data` is JSON with `partition`, `code`, `qualifier`, `category`, `zoneOrUser` and `text`
 
 See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/example-zone-config.md](docs/example-zone-config.md).
 
@@ -205,7 +234,7 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 |---|---|---|
 | 01 | Zone state change | Implemented (128 zones) |
 | 02 | Partition state change | Implemented, all 8 partitions |
-| 03 | Realtime CID event | Zone events (burglary, perimeter, interior, entry/exit, tamper, fire, water, CO) update zones; other events are recorded in `lastCidEvent` only |
+| 03 | Realtime CID event | Zone events (burglary, perimeter, interior, entry/exit, tamper, fire, water, CO) update zones. Every event is also described in words, recorded in the history and published as `unoEvent` (see [Event descriptions](#event-descriptions)) |
 | 04 | Zone bypass state | Implemented |
 | 05 | Host information | Implemented |
 | 06 | Partition trouble | Implemented, all 8 partitions |
@@ -221,6 +250,7 @@ How this integration maps to the *EnvisaLink UNO TPI Programmer's Document v1.08
 - The trouble bitfield's BIT 1-8 are read as the low-to-high bits of each partition's byte.
 - The spec describes the disarm code as "4 or 6 digits" in the text and "4-6" in the data column; 4 to 6 digits are accepted.
 - Tamper CID codes (137, 144) are treated as the zone opening and restoring, which the spec does not define.
+- The TPI document does not list the Contact ID codes. The descriptions follow the standard Contact ID code list, and which codes the UNO actually sends has only been checked against the one example in the document.
 
 ## Known limitations
 

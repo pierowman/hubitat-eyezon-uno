@@ -43,6 +43,13 @@ def mainPage() {
                 required: false
         }
 
+        section("Users (optional)") {
+            input "userNames", "textarea",
+                title: "User names",
+                description: "One per line as userNumber:Name, e.g. 2:Alice. Used to say who armed or disarmed. Unnamed users show as 'user N'.",
+                required: false
+        }
+
         section("REST Metadata / Startup Sync") {
             input "useRestMetadata", "bool",
                 title: "Enable REST metadata and startup sync",
@@ -128,7 +135,8 @@ def initialize() {
     logInfo("Initializing UNO integration")
 
     state.zoneHintsMap = parseZoneHints(settings.zoneHints)
-    state.partitionHintsMap = parsePartitionHints(settings.partitionHints)
+    state.partitionHintsMap = parseNumberedNames(settings.partitionHints)
+    state.userNamesMap = parseNumberedNames(settings.userNames)
     state.restZoneLabels = state.restZoneLabels ?: [:]
     state.restPartitionLabels = state.restPartitionLabels ?: [:]
     state.restSystemName = state.restSystemName ?: null
@@ -310,6 +318,18 @@ def notifyPartitionEvents(Integer partition, List events) {
     def dev = getChildDevice("uno-partition-${partition}")
     if (!dev) return
     events?.each { Map e -> dev.sendEvent(e) }
+}
+
+// Lookups the connection driver uses to put names into event descriptions.
+def userName(Integer user) {
+    Map names = (state.userNamesMap instanceof Map) ? state.userNamesMap : [:]
+    return names["${user}"]
+}
+
+def zoneName(Integer zone) {
+    String label = getChildDevice("uno-zone-${zone}")?.label
+    // A zone that still has its default label has no real name to show.
+    return (label && label != "Zone ${zone}") ? label : null
 }
 
 def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String suggestedName = null) {
@@ -594,8 +614,8 @@ private Map parseZoneHints(String raw) {
     return result
 }
 
-// Same "number:name" format as zone hints, but only the name is used.
-private Map parsePartitionHints(String raw) {
+// "number:Name" lines (partition names, user names). Blank lines, comments and bad lines are ignored.
+private Map parseNumberedNames(String raw) {
     Map result = [:]
     if (!raw) return result
 

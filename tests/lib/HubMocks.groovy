@@ -73,6 +73,11 @@ class MockApp {
     List calls = []
     List callArgs = []
     boolean failPartitionNotify = false
+    Map userNames = [:]     // user number -> name, as configured in the app
+    Map zoneNames = [:]     // zone number -> label
+
+    def userName(Integer user) { userNames[user] }
+    def zoneName(Integer zone) { zoneNames[zone] }
 
     def getChildDevice(String dni) { children[dni] }
     def getChildDevices() { children.values() as List }
