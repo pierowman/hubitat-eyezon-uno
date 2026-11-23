@@ -46,7 +46,7 @@ k.section("Saving only restarts the connection when it has to") {
     a.state.startedVersion = "1.2.0"
     a.pending.clear()
     a.updated()
-    k.check("an updated app restarts the connection once", a.pending.containsKey("initializeConnection") && a.state.startedVersion == "1.3.0")
+    k.check("an updated app restarts the connection once", a.pending.containsKey("initializeConnection") && a.state.startedVersion == "1.3.1")
 
     env.children.remove("uno-connection")
     a.pending.clear()

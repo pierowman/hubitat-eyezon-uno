@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Field static final ConcurrentHashMap TEMP_SEEN = new ConcurrentHashMap()      // "<device>:z<zone>" / "<device>:p<n>-inside" -> last temperature byte
 @Field static final ConcurrentHashMap NAME_CACHE = new ConcurrentHashMap()     // "<device>:<zone>" -> [name, at], for the open zone lists
 @Field static final ConcurrentHashMap FRAME_AT = new ConcurrentHashMap()       // device id -> time of the last data from the panel
+@Field static final ConcurrentHashMap ACK_SEEN = new ConcurrentHashMap()       // device id -> [cc, ee, code, at] of the last acknowledgement
 @Field static final ConcurrentHashMap OPEN_SINCE = new ConcurrentHashMap()    // "<device>:<zone>" -> when it opened (or was first seen open)
 @Field static final ConcurrentHashMap LEFT_OPEN = new ConcurrentHashMap()      // "<device>:<zone>" -> [since, leftAt], for a zone that just closed
 
@@ -205,6 +206,7 @@ def minuteCheck() {
 
 // Forgets what was last reported for this device, so everything is sent again.
 private void clearSeen() {
+    ACK_SEEN.remove("${device.id}".toString())
     String prefix = "${device.id}:".toString()
     [CID_SEEN, PARTITION_SEEN, TEMP_SEEN, NAME_CACHE].each { ConcurrentHashMap m ->
         m.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> m.remove(k) }
@@ -239,6 +241,12 @@ def reconnect() {
     state.rxBuffer = ""
     state.lastReconnectTs = now()
     scheduleOfflineCheck()
+
+    // Installing the driver starts it before the app has given it an address.
+    if (!settings.ip) {
+        logInfo("No IP address set yet; not connecting")
+        return
+    }
 
     Integer p = safePort()
     logInfo("Opening raw socket to ${settings.ip}:${p}")
@@ -504,7 +512,7 @@ def clearCommandQueue() {
 }
 
 private String driverVersion() {
-    return "1.3.0"
+    return "1.3.1"
 }
 
 // ---- Health: children report online while the connection is authenticated ----
@@ -921,6 +929,13 @@ def commandTimeoutCheck() {
     // The timer fires on the second, so allow half a second of slack.
     if (ageMs < (commandTimeoutSeconds() * 1000L - 500L)) return
 
+    Map early = answeredEarly(inflight)
+    if (early) {
+        logDebug("${inflight.name} was answered before it was recorded as sent")
+        finishCommand(inflight, early.code as Integer, early.ee as String)
+        return
+    }
+
     if (!inflight.noRetry && (inflight.retries as Integer) < 1) {
         inflight.retries = ((inflight.retries as Integer) + 1)
         inflight.sentAt = now()
@@ -1324,12 +1339,21 @@ private void parseAckFrame(String frame) {
     sendEvent(name: "lastAck", value: ack)
     logDebug("ACK: ${ack}")
 
+    // Kept in memory as well: the reply can arrive before the execution that sent the command has saved it as in
+    // flight, and the timeout check then finds it here instead of resending a command that was already answered.
+    ACK_SEEN.put("${device.id}".toString(), [cc: cc.toUpperCase(), ee: ee, code: code, at: now()])
+
     def inflight = state.commandInFlight
     // The ack echoes the command it answers; ignore acks for anything other than the in-flight command.
     if (!inflight || !cc.equalsIgnoreCase(inflight.cc as String)) {
         return
     }
 
+    finishCommand(inflight, code, ee)
+}
+
+// Completes the in-flight command from the panel's response code (0 is accepted).
+private void finishCommand(Map inflight, Integer code, String ee) {
     if (code == 1 && retryBusyCommand(inflight)) return
 
     if (code != 0) {
@@ -1342,6 +1366,13 @@ private void parseAckFrame(String frame) {
     state.commandInFlight = null
 
     processQueue()
+}
+
+// The reply to the in-flight command if it already arrived (after the command was sent), otherwise null.
+private Map answeredEarly(Map inflight) {
+    Map seen = (Map) ACK_SEEN.get("${device.id}".toString())
+    if (seen == null || seen.cc != (inflight.cc as String).toUpperCase()) return null
+    return ((seen.at as Long) >= (inflight.sentAt as Long)) ? seen : null
 }
 
 // Response code 1 means the panel was still busy and did not run the command (spec 3.7), so it is safe to

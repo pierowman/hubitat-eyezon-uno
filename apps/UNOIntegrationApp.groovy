@@ -261,7 +261,7 @@ def initialize() {
 }
 
 private String appVersion() {
-    return "1.3.0"
+    return "1.3.1"
 }
 
 // The settings a running connection cannot pick up on its own.
