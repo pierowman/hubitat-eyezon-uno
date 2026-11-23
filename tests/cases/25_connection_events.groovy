@@ -66,8 +66,95 @@ k.section("Alarms, troubles and other events in words") {
     k.check("an exception such as failed to close", d.lastAttr("lastEvent") == "Failed to close by user 2" && d.lastAttr("lastEventType") == "exception", d.lastAttr("lastEvent"))
     k.feed(d, "%03,1999010000\$")
     k.check("an unknown code is still reported", d.lastAttr("lastEvent") == "Event 999" && d.lastAttr("lastEventType") == "other", d.lastAttr("lastEvent"))
+    k.feed(d, "%03,2130010050\$")
+    k.check("a qualifier other than 1, 3 or 6 is not described", d.lastAttr("lastEvent") == "Event 999")
+}
+
+k.section("Every Contact ID field is an attribute a rule can test") {
+    def d = k.authed()
+    d.parent.userNames[2] = "Alice"
+    d.parent.zoneNames[5] = "Front Door"
+
+    k.feed(d, "%03,3441010020\$")
+    k.check("an arm: the raw event, its parts and who did it", d.lastAttr("lastEventRaw") == "3441010020" && d.lastAttr("lastEventCode") == "441" && d.lastAttr("lastEventQualifier") == "3" && d.lastAttr("lastEventPartition") == "1" && d.lastAttr("lastEventZone") == "0" && d.lastAttr("lastEventUser") == "Alice", d.currentVals)
+    k.check("with the sentence and type", d.lastAttr("lastEvent") == "Armed (stay) by Alice" && d.lastAttr("lastEventType") == "arm")
+
+    k.feed(d, "%03,1130010050\$")
+    k.check("an alarm: the zone that caused it, and no user", d.lastAttr("lastEventRaw") == "1130010050" && d.lastAttr("lastEventCode") == "130" && d.lastAttr("lastEventQualifier") == "1" && d.lastAttr("lastEventZone") == "5" && d.lastAttr("lastEventUser") == "none", d.currentVals)
+    k.feed(d, "%03,3130010050\$")
+    k.check("its restoral says so, for the same zone", d.lastAttr("lastEventQualifier") == "3" && d.lastAttr("lastEventZone") == "5" && d.lastAttr("lastEvent") == "Burglary alarm restored: Front Door (zone 5)")
+
+    k.feed(d, "%03,1301010000\$")
+    k.check("a panel-wide trouble has neither a zone nor a user", d.lastAttr("lastEventCode") == "301" && d.lastAttr("lastEventZone") == "0" && d.lastAttr("lastEventUser") == "none")
+
+    k.feed(d, "%03,1461010040\$")
+    k.check("a user-field event shows the user", d.lastAttr("lastEventUser") == "user 4" && d.lastAttr("lastEventZone") == "0")
+
+    k.feed(d, "%03,1401010000\$")
+    k.check("user 0 is the system", d.lastAttr("lastEventUser") == "the system")
+
+    k.feed(d, "%03,1384010070\$")
+    k.check("a sensor trouble names the zone", d.lastAttr("lastEventZone") == "7" && d.lastAttr("lastEventCode") == "384")
+
+    def p = k.authed()
+    k.feed(p, "%03,1130020050\$")
+    k.check("the partition is its own attribute", p.lastAttr("lastEventPartition") == "2")
+}
+
+k.section("Details are set before lastEvent, so a rule on lastEvent sees the same event") {
+    def d = k.authed()
+    k.feed(d, "%03,1130010050\$")
+    List names = d.events.findAll { it.name.startsWith("lastEvent") }*.name
+    k.check("lastEvent is the last attribute of the event to change", names.last() == "lastEvent" && names.indexOf("lastEventZone") < names.indexOf("lastEvent") && names.indexOf("lastEventRaw") < names.indexOf("lastEvent"), names)
+
+    k.feed(d, "%03,1130010050\$")
+    k.check("the same event again fires again", d.events.count { it.name == "lastEvent" } == 2 && d.events.findAll { it.name == "lastEvent" }.every { it.isStateChange == true })
+}
+
+k.section("The unoEvent location event carries the raw event, zone and user too") {
+    def d = k.authed()
+    d.parent.userNames[2] = "Alice"
+    k.feed(d, "%03,3441010020\$")
+    def arm = new groovy.json.JsonSlurper().parseText(d.locationEvents.find { it.name == "unoEvent" }.data)
+    k.check("an arm names the user", arm.raw == "3441010020" && arm.user == "Alice" && arm.zone == null && arm.zoneOrUser == 2, arm)
+
+    d.locationEvents.clear()
+    k.feed(d, "%03,1130010050\$")
+    def alarm = new groovy.json.JsonSlurper().parseText(d.locationEvents.find { it.name == "unoEvent" }.data)
+    k.check("an alarm names the zone", alarm.zone == 5 && alarm.user == null && alarm.raw == "1130010050" && alarm.category == "alarm", alarm)
+}
+
+k.section("Previously reported events (qualifier 6)") {
+    def d = k.authed()
+    d.parent.userNames[2] = "Alice"
+    d.parent.zoneNames[5] = "Front Door"
+
     k.feed(d, "%03,6130010050\$")
-    k.check("a qualifier other than 1 or 3 is not described", d.lastAttr("lastEvent") == "Event 999")
+    k.check("a replayed alarm is shown as such, with its fields", d.lastAttr("lastEvent") == "Previously reported: Burglary alarm: Front Door (zone 5)" && d.lastAttr("lastEventType") == "report" && d.lastAttr("lastEventQualifier") == "6" && d.lastAttr("lastEventZone") == "5" && d.lastAttr("lastEventRaw") == "6130010050", d.currentVals)
+    k.check("it is a location event too", d.locationEvents.any { it.name == "unoEvent" && it.value == "report:130" })
+
+    k.feed(d, "%03,6401010020\$")
+    k.check("a replayed open/close doesn't claim to be an arm or a disarm", d.lastAttr("lastEvent") == "Previously reported: open/close by Alice" && d.lastAttr("lastEventType") == "report" && d.lastAttr("lastEventUser") == "Alice", d.lastAttr("lastEvent"))
+
+    d.parent.partitionEvents.clear()
+    int hist = d.historyList().size()
+    d.parent.callArgs.clear()
+    k.feed(d, "%03,6130010050\$")
+    k.check("it is not recorded, notified, or counted as an alarm, arm or disarm", d.historyList().size() == hist && !d.parent.callArgs.any { it[0] == "notifyEvent" } && d.parent.partitionEvents.isEmpty(), [d.historyList().size(), d.parent.callArgs, d.parent.partitionEvents])
+
+    def z = k.authed()
+    k.feed(z, "%01," + ("0" * 32) + "\$")
+    k.feed(z, "%03,6130010050\$")
+    k.check("and it never opens a zone", z.parent.children["uno-zone-5"].last("contact") == "closed")
+}
+
+k.section("Test reports stay out unless asked for, raw included") {
+    def d = k.authed()
+    k.feed(d, "%03,1602010000\$")
+    k.check("a periodic test changes no event attribute by default", d.lastAttr("lastEventRaw") == null && d.lastAttr("lastEventCode") == null)
+    def o = k.authed(recordTestEvents: true)
+    k.feed(o, "%03,1602010000\$")
+    k.check("turned on, it is there", o.lastAttr("lastEventRaw") == "1602010000" && o.lastAttr("lastEventCode") == "602")
 }
 
 k.section("Event history") {

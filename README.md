@@ -49,7 +49,7 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Plain-language event descriptions from the UNO's Contact ID events: who armed or disarmed ("Armed by Alice"), which sensor alarmed, troubles and restorals
 - Event history (the last 10 events as JSON) and per-partition `lastArmedBy` / `lastDisarmedBy` with times
 - `lastAlarmType`, `lastAlarmZone` and `lastAlarmAt` on the partition, for rules about what alarmed and where
-- A location event `unoEvent` for every Contact ID event, for rules
+- A location event `unoEvent` for every Contact ID event, and the raw event, code, qualifier, partition, zone and user as attributes, for rules
 - Panel trouble decoding per partition (AC failure, low battery, server offline, zone trouble, siren fault and more), and a one-line `troubleSummary`
 - Panel model, firmware, MAC address and time
 - Zone timers (`dumpZoneTimers`) and, with diagnostic events on, keypad sounds (`lastKeypadSound`)
@@ -234,7 +234,7 @@ Unrecognised or transitory panel states are reported as `busy`, as the TPI docum
 
 **Status device**: `openZones`, `bypassedZones`, `troubleSummary` (`none`, or the active troubles, labelled `P1: ...; P3: ...` when more than one partition has any), `staleSensors` and `healthStatus`.
 
-**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `openZones`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
+**Connection device**: `connectionState`, `lastAck`, `panelModel`, `firmwareVersion`, `panelMac`, `restStartupSync`, `lastCidEvent` (the raw event), `lastEvent` / `lastEventType` (the last event from any partition, in words), `eventHistory`, `lastEventRaw`, `lastEventCode`, `lastEventQualifier`, `lastEventPartition`, `lastEventZone`, `lastEventUser`, `openZones`, `bypassedZones`, `troubleSummary`, `zoneTimers`, `healthStatus`, plus mirrors of partition 1's state, trouble and chime attributes (`alarmSystemStatus`, `troubleState` and the rest). `panelTime`, `lastHeartbeat`, `lastRawMessage` and `lastKeypadSound` are published only when **Publish diagnostic events** is on.
 
 `zoneTimers` is JSON from the last `dumpZoneTimers`: for each zone with a timer, `"open"` or the seconds since it closed, for example `{"1":"open","2":5,"4":327625}`. The UNO's timers tick every 5 seconds and forget a zone after about 3.8 days, so older zones are left out.
 
@@ -250,12 +250,31 @@ The UNO reports what happens (an arm, an alarm, a trouble) as Contact ID events.
 
 Zone names come from the zone devices' labels, and user names from the **User names** setting. About 110 Contact ID codes are described; any other code is still reported as `Event 999` so nothing is hidden.
 
-`lastEventType` (and the `unoEvent` category) is one of `arm`, `disarm`, `alarm`, `trouble`, `supervisory`, `bypass`, `access`, `exception`, `test` or `other`.
+`lastEventType` (and the `unoEvent` category) is one of `arm`, `disarm`, `alarm`, `trouble`, `supervisory`, `bypass`, `access`, `exception`, `test`, `report` or `other`.
 
 - **Arm / disarm:** an opening (qualifier 1) is a disarm and a closing (qualifier 3) is an arm, matching the example in the TPI document (`3441010020`: closing, armed stay, partition 1, user 2). The arm *mode* comes from the partition state and is kept in `lastArmMode`.
 - **History:** the `eventHistory` attribute holds the newest 10 events as JSON (`at`, `partition`, `code`, `type`, `text`), newest first. The last 25 are kept in the driver's memory rather than the hub database, so after a hub restart only the 10 in the attribute are remembered. Use `clearEventHistory` to empty it.
 - **Alarm restorals** are described as `... restored`.
 - **Who:** the last field of an arm or access event is a user number. User 0 is shown as `the system`.
+- **Previously reported (qualifier 6):** a status report that replays an older event is shown as `Previously reported: ...` with type `report`. It updates the event attributes and `unoEvent`, but is never recorded in the history, notified, or counted as an arm, disarm or alarm, and it never opens a zone. A replayed open/close doesn't say whether it was an arm or a disarm, because the direction isn't known.
+
+### Every field as an attribute
+
+The connection device publishes each part of the latest Contact ID event as its own attribute, so a rule can test it directly instead of parsing the sentence:
+
+| Attribute | Value |
+|---|---|
+| `lastEventRaw` | The event exactly as the UNO sent it, for example `3441010020` |
+| `lastEventCode` | The Contact ID event code, for example `441` or `130` |
+| `lastEventQualifier` | `1` event (or opening), `3` restoral (or closing), `6` previously reported |
+| `lastEventPartition` | The partition number (0 for a panel-wide event) |
+| `lastEventZone` | The zone for alarms, bypasses and sensor troubles, or `0` when the event has none |
+| `lastEventUser` | The user for arms, disarms and access events (the name you gave them, `user N`, or `the system`), or `none` |
+| `lastEventType`, `lastEvent` | The category and the sentence |
+
+`lastEvent` is set last, and every attribute fires on every event even when its value repeats. A rule triggered by a change to `lastEvent` therefore always sees the code, zone and user of that same event.
+
+Contact ID test reports (602 and the like) change none of these unless **Record Contact ID test reports** is on. The raw `lastCidEvent` summary still updates for every frame.
 
 ## Automations
 
@@ -263,10 +282,12 @@ Zone changes are published as location events so rules can react immediately:
 
 - Event name `unoZoneEvent`, value `<zone>:open` or `<zone>:closed` (for example `17:open`)
 
-Every Contact ID event is also published as a location event, so a rule can react to who armed or what alarmed:
+Every Contact ID event is also published as a location event, so a custom app or WebCoRE can react to who armed or what alarmed:
 
-- Event name `unoEvent`, value `<category>:<code>` (for example `arm:401`, `disarm:401`, `alarm:130`, `trouble:301`)
-- `descriptionText` is the sentence, and `data` is JSON with `partition`, `code`, `qualifier`, `category`, `zoneOrUser` and `text`
+- Event name `unoEvent`, value `<category>:<code>` (for example `arm:401`, `disarm:401`, `alarm:130`, `trouble:301`, `report:130`)
+- `descriptionText` is the sentence, and `data` is JSON with `partition`, `code`, `qualifier`, `category`, `zoneOrUser`, `zone` (the zone number, or null), `user` (the user's name, or null), `raw` and `text`
+
+As far as I know Rule Machine can't trigger on a custom location event. For Rule Machine, trigger on a change to the connection device's `lastEvent` and test `lastEventCode`, `lastEventZone` or `lastEventUser` (see [Every field as an attribute](#every-field-as-an-attribute)). For example, "`lastEvent` changed AND `lastEventType` is `disarm` AND `lastEventUser` is `Alice`".
 
 See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/example-zone-config.md](docs/example-zone-config.md).
 

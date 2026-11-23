@@ -28,7 +28,7 @@ The exit code is non-zero if anything fails.
 | `cases/00_static.groovy` | Every file compiles, no undefined calls, manifests valid and complete |
 | `cases/10_connection_session.groovy` | Login, reconnect, back-off, watchdog, frame robustness |
 | `cases/20_connection_frames.groovy` | Frames from the UNO: zones, partitions, trouble, bypass, CID, host info, chime |
-| `cases/25_connection_events.groovy` | Contact ID semantics: who armed or disarmed, alarm and trouble text, history, `unoEvent` |
+| `cases/25_connection_events.groovy` | Contact ID semantics: who armed or disarmed, alarm and trouble text, history, `unoEvent`, every field as an attribute, previously reported (qualifier 6) events |
 | `cases/27_connection_features.groovy` | In-memory codes, tamper, health, diagnostic/test-event settings, PGM, temperatures, notifications, `debugDump` |
 | `cases/28_connection_panel.groovy` | Skipped unchanged frames, open/bypassed/trouble summaries, zone conditions, last alarm, arm with bypass, zone timers, keypad sounds, the minute schedule, resync |
 | `cases/29_connection_options.groovy` | Keepalive interval, the watchdog's margin, command timeout and queue age, zones per partition |

@@ -54,6 +54,12 @@ metadata {
         attribute "lastCidEvent", "string"
         attribute "lastEvent", "string"
         attribute "lastEventType", "string"
+        attribute "lastEventRaw", "string"
+        attribute "lastEventCode", "string"
+        attribute "lastEventQualifier", "string"
+        attribute "lastEventPartition", "number"
+        attribute "lastEventZone", "number"
+        attribute "lastEventUser", "string"
         attribute "eventHistory", "string"
         attribute "restStartupSync", "string"
 
@@ -1463,7 +1469,7 @@ private void handleCidEvent(List<String> parts) {
 
     // Describe it in plain words (who armed, which sensor alarmed, and so on) without affecting the zone fast path.
     try {
-        publishCidEvent(qualifier, eventCode, partition, zone)
+        publishCidEvent(qualifier, eventCode, partition, zone, cid)
     } catch (Exception e) {
         logWarn("Could not describe CID event ${eventCode}: ${e}")
     }
@@ -1641,7 +1647,7 @@ private Map describeCid(String qualifier, String code, Integer zoneOrUser) {
         boolean armed = restore
         String suffix = (armed || !(code in ["441", "442"])) ? CID_ARM_SUFFIX[code] : ""
         String who = userLabel(zoneOrUser)
-        return [category: armed ? "arm" : "disarm", text: "${armed ? 'Armed' : 'Disarmed'}${suffix} by ${who}".toString(), who: who]
+        return [category: armed ? "arm" : "disarm", text: "${armed ? 'Armed' : 'Disarmed'}${suffix} by ${who}".toString(), who: who, zone: null]
     }
 
     List info = CID_EVENTS[code]
@@ -1653,20 +1659,37 @@ private Map describeCid(String qualifier, String code, Integer zoneOrUser) {
     if (restore && category in ["alarm", "trouble", "bypass", "supervisory"]) text += " restored"
 
     String field = cidField(code, category)
+    Integer zone = null
     if (field == "zone" && zoneOrUser > 0) {
+        zone = zoneOrUser
         text += ": " + zoneLabel(zoneOrUser)
     } else if (field == "user" && zoneOrUser > 0) {
         who = userLabel(zoneOrUser)
         text += " by ${who}"
     }
 
-    return [category: category, text: text.toString(), who: who]
+    return [category: category, text: text.toString(), who: who, zone: zone]
 }
 
-private void publishCidEvent(String qualifier, String code, Integer partition, Integer zoneOrUser) {
-    if (!(qualifier in ["1", "3"])) return
+// Qualifier 6 means "previously reported" (a status report replaying an old event), so the open/close
+// direction isn't known and it must not look like a new arm, disarm or alarm.
+private Map describePrevious(String code, Integer zoneOrUser) {
+    if (CID_ARM_SUFFIX.containsKey(code)) {
+        String who = userLabel(zoneOrUser)
+        return [category: "report", text: "Previously reported: open/close by ${who}".toString(), who: who, zone: null]
+    }
+    Map d = describeCid("1", code, zoneOrUser)
+    return d + [category: "report", text: "Previously reported: ${d.text}".toString()]
+}
 
-    Map d = describeCid(qualifier, code, zoneOrUser)
+// Publishes a Contact ID event for people and for rules: the sentence, every field as its own attribute, and a
+// location event. Qualifier 1 is the event, 3 its restoral and 6 a replay of an older event (shown, but never
+// recorded, notified or counted as an arm, disarm or alarm).
+private void publishCidEvent(String qualifier, String code, Integer partition, Integer zoneOrUser, String raw = "") {
+    if (!(qualifier in ["1", "3", "6"])) return
+    boolean previous = (qualifier == "6")
+
+    Map d = previous ? describePrevious(code, zoneOrUser) : describeCid(qualifier, code, zoneOrUser)
 
     // Periodic and manual test reports are routine noise unless asked for.
     if (d.category == "test" && settings.recordTestEvents != true) {
@@ -1676,14 +1699,24 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
 
     String at = new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone)
 
-    sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
+    // Each field is its own attribute so a rule can test the code, zone or user directly. They are set first and
+    // lastEvent last, so a rule triggered by lastEvent always sees the details of that same event.
+    sendEvent(name: "lastEventRaw", value: raw.take(64), isStateChange: true)
+    sendEvent(name: "lastEventCode", value: code, isStateChange: true)
+    sendEvent(name: "lastEventQualifier", value: qualifier, isStateChange: true)
+    sendEvent(name: "lastEventPartition", value: partition, isStateChange: true)
+    sendEvent(name: "lastEventZone", value: (d.zone ?: 0), isStateChange: true)
+    sendEvent(name: "lastEventUser", value: (d.who ?: "none"), isStateChange: true)
     sendEvent(name: "lastEventType", value: d.category, isStateChange: true)
-    recordEventHistory([at: at, partition: partition, code: code, type: d.category, text: d.text])
+    sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
+    if (!previous) recordEventHistory([at: at, partition: partition, code: code, type: d.category, text: d.text])
 
-    try {
-        parent?.notifyEvent([category: d.category, text: d.text, partition: partition, restore: qualifier == "3"])
-    } catch (e) {
-        logDebug("Failed to send notification for CID ${code}: ${e}")
+    if (!previous) {
+        try {
+            parent?.notifyEvent([category: d.category, text: d.text, partition: partition, restore: qualifier == "3"])
+        } catch (e) {
+            logDebug("Failed to send notification for CID ${code}: ${e}")
+        }
     }
 
     try {
@@ -1693,13 +1726,13 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
             descriptionText: d.text,
             isStateChange: true,
             data: JsonOutput.toJson([partition: partition, code: code, qualifier: qualifier, category: d.category,
-                                      zoneOrUser: zoneOrUser, text: d.text])
+                                      zoneOrUser: zoneOrUser, zone: d.zone, user: d.who, raw: raw, text: d.text])
         )
     } catch (e) {
         logDebug("Failed to emit unoEvent for CID ${code}: ${e}")
     }
 
-    if (partition < 1 || partition > 8) return
+    if (previous || partition < 1 || partition > 8) return
 
     List events = [
         [name: "lastEvent", value: d.text.take(255), isStateChange: true],
