@@ -42,6 +42,8 @@ The exit code is non-zero if anything fails.
 | `cases/75_robustness.groovy` | Empty, malformed and missing settings and state never crash setup or frame handling (regression guard for an envisalink_new bug where an empty partition spec made a fallback call `.append()` on `None`) |
 | `cases/76_truncated_data.groovy` | Truncated and garbled frames lose only themselves, the receive buffer is bounded, nothing disconnects, bypass flags always clear, unlisted partition states are busy |
 | `cases/77_state_stability.groovy` | Arming, entry delay and alarm states don't flap while a standing trouble and other frames keep arriving (regression guard for envisalink_new #255) |
+| `cases/78_connection_recovery.groovy` | Recovery never gets stuck: failed connects, closes and sends of any kind, backoff growth and flapping, fused and split messages, mismatched acknowledgements, login timeouts (regression guard for envisalink_new #237/#238) |
+| `cases/79_corrupted_bytes.groovy` | Garbled bytes in every frame type never throw, disconnect or become bogus events, acknowledgements or panel details (regression guard for envisalink_new #234) |
 
 ## Writing a test
 

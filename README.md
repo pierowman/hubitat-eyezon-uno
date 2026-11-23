@@ -303,6 +303,9 @@ See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/examp
 - **Health:** every device reports `healthStatus` `online` once the UNO has accepted the login. If the connection stays down for 30 seconds the devices go `offline`, so a brief reconnect doesn't flap them.
 - **Errors:** a malformed or unexpected frame is logged and skipped; it does not stop the frames behind it.
 - **Truncated data:** if a frame is cut short and the next one starts before it ended, only the damaged frame is lost, not the good one that follows. Data with no frame terminator is dropped (with a warning) once it passes 4,096 characters, so damaged data can't grow the hub's state without limit. Damaged data never disconnects.
+- **Corrupted bytes:** bytes the panel garbles (for example `0xBA` in the middle of a frame) are read one byte per character, so they can't change how a frame is split. A damaged frame is dropped rather than guessed at: a Contact ID event must be 10 digits and an acknowledgement a two-digit command and a numeric code, so garbage can't become a false "armed by Alice" or write nonsense into `lastAck`.
+- **Failed sends:** if the socket can't be written to, that is treated as a lost connection: the command that couldn't be sent is dropped and logged, and a reconnect is scheduled, rather than leaving the command blocking the queue.
+- **Keepalive can't be switched off.** Some panels drop a connection that has been idle for a long time without telling the client (reported for the EVL-4), and the first command afterwards then fails. A poll every 30 seconds to 10 minutes avoids that.
 
 ## REST metadata and startup sync
 

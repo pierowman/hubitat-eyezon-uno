@@ -905,7 +905,14 @@ private void rawSend(String msg, String logMsg = null) {
     if (settings.traceLogging) {
         log.debug "TX >>> ${logMsg ?: redact(msg)}"
     }
-    interfaces.rawSocket.sendMessage(msg)
+    try {
+        interfaces.rawSocket.sendMessage(msg)
+    } catch (Throwable e) {
+        // A socket that can't be written to is a lost connection. Treating it as one reconnects, and drops the
+        // command that couldn't be sent, instead of leaving it to block the queue.
+        logWarn("Send failed: ${e}")
+        socketStatus("error: send failed")
+    }
 }
 
 def parse(String message) {
@@ -987,7 +994,9 @@ def parse(String message) {
 private String decodeIncoming(String message) {
     try {
         byte[] data = hubitat.helper.HexUtils.hexStringToByteArray(message)
-        String decoded = new String(data)
+        // One byte is one character whatever the hub's default character set, so a damaged byte can't change how
+        // many characters follow it (and can't swallow a terminator).
+        String decoded = new String(data, "ISO-8859-1")
         if (settings.traceLogging) {
             log.debug "RX HEX <<< ${message}"
             log.debug "RX TXT <<< ${decoded}"
@@ -1231,6 +1240,11 @@ private void parseAckFrame(String frame) {
     String cc = parts[0]
     String ee = parts[1]
 
+    // An acknowledgement is two hex digits (the command) and a response code. Anything else is damaged data.
+    if (!(cc ==~ /[0-9A-Fa-f]{2}/) || !(ee ==~ /\d+/)) {
+        logDebug("Ignoring malformed acknowledgement: ${redact(frame).take(40)}")
+        return
+    }
     Integer code = safeParseInt(ee, -1)
     String ack = cc + "," + ee
     sendEvent(name: "lastAck", value: ack)
@@ -1465,8 +1479,10 @@ private void handleCidEvent(List<String> parts) {
     if (parts.size() < 2) return
 
     String cid = cleanPayload(parts[1])
-    if (!cid || cid.length() < 10) {
-        logDebug("Ignoring malformed CID event: ${cid}")
+    // A Contact ID event is 10 digits. A damaged one must not be read as a different event (say, an arm by a
+    // user whose number happened to survive), so anything else is dropped.
+    if (!cid || cid.length() < 10 || !(cid.substring(0, 10) ==~ /\d{10}/)) {
+        logDebug("Ignoring malformed CID event: ${redact(cid).take(40)}")
         return
     }
 
