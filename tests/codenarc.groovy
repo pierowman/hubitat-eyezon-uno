@@ -29,6 +29,12 @@ ruleset {
     ruleset('rulesets/naming.xml')
     ruleset('rulesets/security.xml')
     ruleset('rulesets/serialization.xml')
+    // Methods must stay under the default cyclomatic complexity of 20. The rest of the size family (method and class
+    // length, method count, ABC score) is left out: a Hubitat app or driver is one script, so its method count and the
+    // length of a page-building method are set by the platform and not by how tangled the logic is.
+    ruleset('rulesets/size.xml') {
+        include 'CyclomaticComplexity'
+    }
     ruleset('rulesets/exceptions.xml') {
         // The scripts catch broad exceptions on purpose: one bad frame or one failed device call must not stop the
         // rest, and helpers such as the number and firmware parsers return null to say "couldn't read that".

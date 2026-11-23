@@ -26,7 +26,7 @@ groovy tests/lint.groovy                       # CodeNarc over apps/ and drivers
 pip install codespell; codespell README.md INSTALL.md docs tests apps drivers packageManifest.json .github
 ```
 
-- **CodeNarc** uses the rules in `tests/codenarc.groovy`. They are chosen for real mistakes (unused private methods, variables and imports, `println`, insecure `Random`, risky APIs) and not for style, and every one passes today, so a new violation is a regression. The file explains the few exemptions: the partition driver's capability stubs, and the broad `catch` blocks that are deliberate (one bad frame must not stop the rest). To see what another rule family would say, pass your own ruleset file: `groovy tests/lint.groovy my-rules.groovy`. The runner also fails if it checks fewer files than exist, so it can't pass by matching nothing.
+- **CodeNarc** uses the rules in `tests/codenarc.groovy`. They are chosen for real mistakes (unused private methods, variables and imports, `println`, insecure `Random`, risky APIs) and a cyclomatic complexity limit of 20 per method, and not for style, and every one passes today, so a new violation is a regression. The file explains the few exemptions: the partition driver's capability stubs, and the broad `catch` blocks that are deliberate (one bad frame must not stop the rest). To see what another rule family would say, pass your own ruleset file: `groovy tests/lint.groovy my-rules.groovy`. The runner also fails if it checks fewer files than exist, so it can't pass by matching nothing.
 - **codespell** reads `.codespellrc` and needs no ignore list.
 
 CodeNarc can't run on Groovy 2.4, so it is a Groovy 4 job. The 2.4 parse check and test run stay in the `test` job.

@@ -549,27 +549,44 @@ def triggerPgm(def pgm) {
 // Logs a redacted snapshot of the integration's state, for troubleshooting and support requests.
 def debugDump() {
     List<String> lines = []
-    String model = device.currentValue("panelModel")
-    String firmware = device.currentValue("firmwareVersion")
-    String mac = device.currentValue("panelMac")
-    List queue = (state.commandQueue instanceof List) ? state.commandQueue : []
-
     lines << "UNO Connection ${driverVersion()}"
-    lines << "connection: ${device.currentValue('connectionState')}, health ${state.health ?: 'unknown'}, logged in ${state.loggedIn == true}, password rejected ${state.authFailed == true}"
-    lines << "panel: ${model ?: 'unknown'}, firmware ${firmware ?: 'unknown'}, MAC ${mac ?: 'unknown'}"
-    lines << "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, keepalive ${keepaliveSeconds()}s, watchdog ${settings.watchdogMinutes ?: '3'}m, command timeout ${commandTimeoutSeconds()}s"
-    lines << "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})"
-    lines << "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
-    lines << "timing: last frame ${secondsSince(lastFrameAt())}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s"
-    lines << "commands: ${queue.size()} queued (${queue*.name.join(', ') ?: 'none'}), in flight ${state.commandInFlight?.name ?: 'none'}, ${CODE_VAULT.size()} code(s) held in memory"
-    lines << "partitions: ${state.partitionStatus ?: [:]}"
-    lines << "troubles: ${state.troubleBytes ?: [:]}"
-    lines << "last ack: ${device.currentValue('lastAck') ?: 'none'}, last CID: ${state.lastCidEvent ?: 'none'}"
+    lines.addAll(dumpConnectionLines())
+    lines.addAll(dumpSettingsLines())
+    lines.addAll(dumpActivityLines())
     historyList().take(5).each { Map e ->
         lines << "event ${e.at} p${e.partition} ${e.type}: ${e.text}"
     }
 
     lines.each { String line -> log.info "debugDump: ${redact(line)}" }
+}
+
+private List<String> dumpConnectionLines() {
+    String model = device.currentValue("panelModel")
+    String firmware = device.currentValue("firmwareVersion")
+    String mac = device.currentValue("panelMac")
+    return [
+        "connection: ${device.currentValue('connectionState')}, health ${state.health ?: 'unknown'}, logged in ${state.loggedIn == true}, password rejected ${state.authFailed == true}",
+        "panel: ${model ?: 'unknown'}, firmware ${firmware ?: 'unknown'}, MAC ${mac ?: 'unknown'}"
+    ]
+}
+
+private List<String> dumpSettingsLines() {
+    return [
+        "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, keepalive ${keepaliveSeconds()}s, watchdog ${settings.watchdogMinutes ?: '3'}m, command timeout ${commandTimeoutSeconds()}s",
+        "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})",
+        "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
+    ]
+}
+
+private List<String> dumpActivityLines() {
+    List queue = (state.commandQueue instanceof List) ? state.commandQueue : []
+    return [
+        "timing: last frame ${secondsSince(lastFrameAt())}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s",
+        "commands: ${queue.size()} queued (${queue*.name.join(', ') ?: 'none'}), in flight ${state.commandInFlight?.name ?: 'none'}, ${CODE_VAULT.size()} code(s) held in memory",
+        "partitions: ${state.partitionStatus ?: [:]}",
+        "troubles: ${state.troubleBytes ?: [:]}",
+        "last ack: ${device.currentValue('lastAck') ?: 'none'}, last CID: ${state.lastCidEvent ?: 'none'}"
+    ]
 }
 
 private String secondsSince(def ts) {
@@ -949,59 +966,16 @@ def parse(String message) {
     }
 
     // Work on a local copy and store the remainder once: every state access is a database round trip on the hub.
-    String buffer = (state.rxBuffer ?: "") + decoded
-
-    // The prompt has no terminator, so drop it from the buffer or it would prefix the "OK" reply.
-    if (!state.loggedIn && !state.loginSent) {
-        int idx = buffer.toLowerCase().indexOf("login")
-        if (idx >= 0) {
-            int end = idx + 5
-            if (buffer.length() > end && buffer.substring(end, end + 1) == ":") end++
-            buffer = buffer.substring(end)
-            logInfo("UNO presented login prompt")
-            sendEvent(name: "connectionState", value: "loginPrompt")
-            login()
-        }
-    }
+    String buffer = takeLoginPrompt((state.rxBuffer ?: "") + decoded)
 
     while (true) {
-        int idxDollar = buffer.indexOf('$')
-        int idxLf = buffer.indexOf('\n')
-        int idxCr = buffer.indexOf('\r')
-
-        List<Integer> candidates = [idxDollar, idxLf, idxCr].findAll { it >= 0 }
-        if (!candidates) break
-
-        int endIdx = candidates.min()
-        String frame = buffer.substring(0, endIdx).trim()
-        buffer = buffer.substring(endIdx + 1)
-
-        // Every frame starts at its own % (or ^ for an acknowledgement). One found inside a frame means the data
-        // before it was cut short, so only the last frame is kept instead of losing both to a failed parse.
-        int restart = Math.max(frame.lastIndexOf('%'), frame.lastIndexOf('^'))
-        if (restart > 0) {
-            logDebug("Dropped truncated data before a new frame: ${redact(frame.substring(0, restart)).take(80)}")
-            frame = frame.substring(restart)
-        }
-
-        if (frame) {
-            // One bad frame must not stop the rest of the buffer from being processed.
-            try {
-                parseFrame(frame)
-            } catch (Exception e) {
-                logWarn("Error handling frame '${redact(frame).take(80)}': ${e}")
-            }
-        }
+        List split = splitFrame(buffer)
+        if (split == null) break
+        buffer = split[1] as String
+        handleRawFrame(split[0] as String)
     }
 
-    // Login replies are plain words; accept them even if the panel doesn't terminate them.
-    if (state.loginSent && !state.loggedIn) {
-        String pending = buffer.trim()
-        if (pending.equalsIgnoreCase("OK") || pending.equalsIgnoreCase("FAILED") || pending.equalsIgnoreCase("Timed Out!") || pending.equalsIgnoreCase("Timed Out")) {
-            buffer = ""
-            parseFrame(pending)
-        }
-    }
+    buffer = takeBareLoginReply(buffer)
 
     // The longest real frame (zone timers) is about 520 characters. Far more than that with no terminator is
     // damaged data, and keeping it would grow the hub's state for ever.
@@ -1011,6 +985,68 @@ def parse(String message) {
     }
 
     state.rxBuffer = buffer
+}
+
+// The login prompt has no terminator, so it is removed from the buffer (or it would prefix the "OK" reply) and
+// answered with the password. Returns the rest of the buffer.
+private String takeLoginPrompt(String buffer) {
+    if (state.loggedIn || state.loginSent) return buffer
+
+    int idx = buffer.toLowerCase().indexOf("login")
+    if (idx < 0) return buffer
+
+    int end = idx + 5
+    if (buffer.length() > end && buffer.substring(end, end + 1) == ":") end++
+    logInfo("UNO presented login prompt")
+    sendEvent(name: "connectionState", value: "loginPrompt")
+    login()
+    return buffer.substring(end)
+}
+
+// The next complete frame (ended by $, CR or LF) and what follows it, or null if there is no complete frame yet.
+private List splitFrame(String buffer) {
+    List<Integer> candidates = [buffer.indexOf('$'), buffer.indexOf('\n'), buffer.indexOf('\r')].findAll { it >= 0 }
+    if (!candidates) return null
+
+    int endIdx = candidates.min()
+    return [buffer.substring(0, endIdx).trim(), buffer.substring(endIdx + 1)]
+}
+
+private void handleRawFrame(String raw) {
+    String frame = dropTruncatedPrefix(raw)
+    if (!frame) return
+
+    // One bad frame must not stop the rest of the buffer from being processed.
+    try {
+        parseFrame(frame)
+    } catch (Exception e) {
+        logWarn("Error handling frame '${redact(frame).take(80)}': ${e}")
+    }
+}
+
+// Every frame starts at its own % (or ^ for an acknowledgement). One found inside a frame means the data
+// before it was cut short, so only the last frame is kept instead of losing both to a failed parse.
+private String dropTruncatedPrefix(String frame) {
+    int restart = Math.max(frame.lastIndexOf('%'), frame.lastIndexOf('^'))
+    if (restart <= 0) return frame
+
+    logDebug("Dropped truncated data before a new frame: ${redact(frame.substring(0, restart)).take(80)}")
+    return frame.substring(restart)
+}
+
+private boolean isLoginReply(String text) {
+    return ["OK", "FAILED", "Timed Out!", "Timed Out"].any { String word -> text.equalsIgnoreCase(word) }
+}
+
+// Login replies are plain words; accept them even if the panel doesn't terminate them.
+private String takeBareLoginReply(String buffer) {
+    if (!state.loginSent || state.loggedIn) return buffer
+
+    String pending = buffer.trim()
+    if (!isLoginReply(pending)) return buffer
+
+    parseFrame(pending)
+    return ""
 }
 
 private String decodeIncoming(String message) {
@@ -1037,55 +1073,7 @@ private void parseFrame(String frame) {
         sendEvent(name: "lastRawMessage", value: frame.take(1024))
     }
 
-    if (frame.equalsIgnoreCase("OK")) {
-        state.loggedIn = true
-        state.loginSent = false
-        state.authFailed = false
-        state.authenticatedAt = now()
-        logInfo("UNO login successful")
-        sendEvent(name: "connectionState", value: "authenticated")
-        unschedule("offlineCheck")
-        state.offlineCheckDueAt = 0L
-        markHealth("online")
-
-        if (settings.useRestMetadata == true && state.restStartupDone != true) {
-            try {
-                restStartupSync()
-            } catch (e) {
-                logWarn("REST startup sync failed: ${e}")
-            }
-        }
-
-        // The panel sends host information (%05) on its own with each poll, but asking now means the model, firmware
-        // and MAC are known straight away rather than at the first poll (which can be 10 minutes away).
-        enqueueCommand("0C", "", "refreshAll")
-        enqueueCommand("0D", "", "hostInfo")
-        processQueue()
-        return
-    }
-
-    if (frame.equalsIgnoreCase("FAILED")) {
-        state.loggedIn = false
-        state.loginSent = false
-        state.authFailed = true
-        logWarn("UNO login failed")
-        sendEvent(name: "connectionState", value: "auth_failed")
-        scheduleReconnect(300)
-        return
-    }
-
-    if (frame.equalsIgnoreCase("Timed Out!") || frame.equalsIgnoreCase("Timed Out")) {
-        state.loginSent = false
-        logWarn("UNO login timed out")
-        sendEvent(name: "connectionState", value: "loginTimedOut")
-        scheduleReconnect(nextReconnectDelay())
-        return
-    }
-
-    if (frame.equalsIgnoreCase("Login:")) {
-        logDebug("Ignoring login prompt frame after handling")
-        return
-    }
+    if (handleLoginText(frame)) return
 
     if (frame.startsWith("^")) {
         parseAckFrame(frame)
@@ -1100,7 +1088,69 @@ private void parseFrame(String frame) {
     List<String> parts = frame.substring(1).split(",", -1) as List<String>
     if (!parts || parts.isEmpty()) return
 
-    String code = parts[0]
+    dispatchFrame(parts[0], parts)
+}
+
+// The plain-word replies of the login exchange. Returns true if the text was one of them.
+private boolean handleLoginText(String frame) {
+    if (frame.equalsIgnoreCase("OK")) {
+        onLoginAccepted()
+    } else if (frame.equalsIgnoreCase("FAILED")) {
+        onLoginRejected()
+    } else if (frame.equalsIgnoreCase("Timed Out!") || frame.equalsIgnoreCase("Timed Out")) {
+        onLoginTimedOut()
+    } else if (frame.equalsIgnoreCase("Login:")) {
+        logDebug("Ignoring login prompt frame after handling")
+    } else {
+        return false
+    }
+    return true
+}
+
+private void onLoginAccepted() {
+    state.loggedIn = true
+    state.loginSent = false
+    state.authFailed = false
+    state.authenticatedAt = now()
+    logInfo("UNO login successful")
+    sendEvent(name: "connectionState", value: "authenticated")
+    unschedule("offlineCheck")
+    state.offlineCheckDueAt = 0L
+    markHealth("online")
+
+    if (settings.useRestMetadata == true && state.restStartupDone != true) {
+        try {
+            restStartupSync()
+        } catch (e) {
+            logWarn("REST startup sync failed: ${e}")
+        }
+    }
+
+    // The panel sends host information (%05) on its own with each poll, but asking now means the model, firmware
+    // and MAC are known straight away rather than at the first poll (which can be 10 minutes away).
+    enqueueCommand("0C", "", "refreshAll")
+    enqueueCommand("0D", "", "hostInfo")
+    processQueue()
+}
+
+private void onLoginRejected() {
+    state.loggedIn = false
+    state.loginSent = false
+    state.authFailed = true
+    logWarn("UNO login failed")
+    sendEvent(name: "connectionState", value: "auth_failed")
+    scheduleReconnect(300)
+}
+
+private void onLoginTimedOut() {
+    state.loginSent = false
+    logWarn("UNO login timed out")
+    sendEvent(name: "connectionState", value: "loginTimedOut")
+    scheduleReconnect(nextReconnectDelay())
+}
+
+// Routes a frame from the UNO (%CC,DATA$) to its handler by command code (spec 3.3).
+private void dispatchFrame(String code, List<String> parts) {
     switch (code) {
         case "01":
             handleZoneBitmap(parts)
@@ -1280,24 +1330,39 @@ private void parseAckFrame(String frame) {
         return
     }
 
-    // Response code 1 means the panel was still busy and did not run the command (spec 3.7), so it is safe to
-    // send it again after a growing delay: 1s, 2s, 4s.
-    if (code == 1 && safeInt(inflight.overruns, 0) < 3) {
-        Integer attempt = safeInt(inflight.overruns, 0) + 1
-        Integer delay = 1 << (attempt - 1)
-        inflight.overruns = attempt
-        inflight.waiting = true
-        state.commandInFlight = inflight
-        unschedule("commandTimeoutCheck")
-        logWarn("${inflight.name}: the UNO was busy (receive buffer overrun); retry ${attempt} of 3 in ${delay}s")
-        runIn(delay, "retryInFlight")
-        return
-    }
+    if (code == 1 && retryBusyCommand(inflight)) return
 
     if (code != 0) {
         logWarn("Command ${inflight.name} rejected: ${tpiResponseText(code)} (code ${ee})")
         sendEvent(name: "lastAck", value: "error:${inflight.name}:${ee}", isStateChange: true)
-    } else if (inflight.name == "chimeOn" || inflight.name == "chimeOff") {
+    } else {
+        onCommandAccepted(inflight)
+    }
+    releaseSecret(inflight)
+    state.commandInFlight = null
+
+    processQueue()
+}
+
+// Response code 1 means the panel was still busy and did not run the command (spec 3.7), so it is safe to
+// send it again after a growing delay: 1s, 2s, 4s. Returns false once the retries are used up.
+private boolean retryBusyCommand(Map inflight) {
+    if (safeInt(inflight.overruns, 0) >= 3) return false
+
+    Integer attempt = safeInt(inflight.overruns, 0) + 1
+    Integer delay = 1 << (attempt - 1)
+    inflight.overruns = attempt
+    inflight.waiting = true
+    state.commandInFlight = inflight
+    unschedule("commandTimeoutCheck")
+    logWarn("${inflight.name}: the UNO was busy (receive buffer overrun); retry ${attempt} of 3 in ${delay}s")
+    runIn(delay, "retryInFlight")
+    return true
+}
+
+// What to record when the panel accepted a command, for the commands that get no state back.
+private void onCommandAccepted(Map inflight) {
+    if (inflight.name == "chimeOn" || inflight.name == "chimeOff") {
         // The TPI doesn't report chime state, so this reflects the last accepted command.
         String chime = inflight.name == "chimeOn" ? "on" : "off"
         Integer chimePartition = safeInt(inflight.partition, 1)
@@ -1307,13 +1372,9 @@ private void parseAckFrame(String frame) {
         // No state comes back for a PGM, so the best we can say is when the panel last accepted a trigger.
         parent?.notifyPgmEvents(inflight.pgm as Integer, [[name: "lastTriggered", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone), isStateChange: true]])
     }
-    if (code == 0 && (inflight.name == "armStay" || inflight.name == "armAway")) {
+    if (inflight.name == "armStay" || inflight.name == "armAway") {
         noteArmRequest(safeInt(inflight.data, 1), inflight.name == "armStay" ? "stay" : "away")
     }
-    releaseSecret(inflight)
-    state.commandInFlight = null
-
-    processQueue()
 }
 
 private String tpiResponseText(Integer code) {
@@ -1675,6 +1736,11 @@ private void handleCidEvent(List<String> parts) {
 
     if (zone <= 0 || !configuredZones().contains(zone)) return
 
+    routeCidZoneEvent(eventCode, zone, isEvent, isRestore)
+}
+
+// Applies a Contact ID event that names a configured zone to that zone's sensor.
+private void routeCidZoneEvent(String eventCode, Integer zone, boolean isEvent, boolean isRestore) {
     // Tamper, low battery and lost supervision are their own conditions, not the zone opening,
     // so they update an attribute on the zone instead.
     Map condition = ZONE_CONDITIONS[eventCode]
@@ -1683,12 +1749,8 @@ private void handleCidEvent(List<String> parts) {
         return
     }
 
-    Set<String> fastPathZoneCodes = [
-        "110", "113", "130", "131", "132", "134", "154", "162"
-    ] as Set
-
     // Only zone-type codes carry a zone number; for others (e.g. arm/disarm) it is a user ID.
-    if (!fastPathZoneCodes.contains(eventCode)) return
+    if (!FAST_PATH_ZONE_CODES.contains(eventCode)) return
     if (!(isEvent || isRestore)) return
 
     parent?.upsertDiscoveredZone(zone, suggestTypeFromCid(eventCode), null)
@@ -1701,6 +1763,9 @@ private void handleCidEvent(List<String> parts) {
     emitZoneFastEvent(zone, active)
     routeZoneUpdate(zone, active)
 }
+
+// Contact ID codes that carry a zone number and mean the zone opened (or closed again, as a restoral).
+@Field static final Set<String> FAST_PATH_ZONE_CODES = ["110", "113", "130", "131", "132", "134", "154", "162"] as Set
 
 // Contact ID codes that describe a condition of the zone's sensor rather than the zone opening.
 // code -> zone attribute, its value while the condition is present and when it clears, and how to say it.
@@ -1898,16 +1963,7 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
 
     String at = new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone)
 
-    // Each field is its own attribute so a rule can test the code, zone or user directly. They are set first and
-    // lastEvent last, so a rule triggered by lastEvent always sees the details of that same event.
-    sendEvent(name: "lastEventRaw", value: raw.take(64), isStateChange: true)
-    sendEvent(name: "lastEventCode", value: code, isStateChange: true)
-    sendEvent(name: "lastEventQualifier", value: qualifier, isStateChange: true)
-    sendEvent(name: "lastEventPartition", value: partition, isStateChange: true)
-    sendEvent(name: "lastEventZone", value: (d.zone ?: 0), isStateChange: true)
-    sendEvent(name: "lastEventUser", value: (d.who ?: "none"), isStateChange: true)
-    sendEvent(name: "lastEventType", value: d.category, isStateChange: true)
-    sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
+    publishCidAttributes(qualifier, code, partition, d, raw)
     if (!previous) recordEventHistory([at: at, partition: partition, code: code, type: d.category, text: d.text])
 
     if (!previous) {
@@ -1933,6 +1989,25 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
 
     if (previous || partition < 1 || partition > 8) return
 
+    parent?.notifyPartitionEvents(partition, partitionEventsFor(qualifier, code, zoneOrUser, d, at))
+}
+
+// Each field is its own attribute so a rule can test the code, zone or user directly. They are set first and
+// lastEvent last, so a rule triggered by lastEvent always sees the details of that same event.
+private void publishCidAttributes(String qualifier, String code, Integer partition, Map d, String raw) {
+    sendEvent(name: "lastEventRaw", value: raw.take(64), isStateChange: true)
+    sendEvent(name: "lastEventCode", value: code, isStateChange: true)
+    sendEvent(name: "lastEventQualifier", value: qualifier, isStateChange: true)
+    sendEvent(name: "lastEventPartition", value: partition, isStateChange: true)
+    sendEvent(name: "lastEventZone", value: (d.zone ?: 0), isStateChange: true)
+    sendEvent(name: "lastEventUser", value: (d.who ?: "none"), isStateChange: true)
+    sendEvent(name: "lastEventType", value: d.category, isStateChange: true)
+    sendEvent(name: "lastEvent", value: d.text.take(255), isStateChange: true)
+}
+
+// The attributes of the partition device that an event updates: the last event, and who armed or disarmed
+// or which alarm went off.
+private List partitionEventsFor(String qualifier, String code, Integer zoneOrUser, Map d, String at) {
     List events = [
         [name: "lastEvent", value: d.text.take(255), isStateChange: true],
         [name: "lastEventType", value: d.category, isStateChange: true]
@@ -1947,7 +2022,7 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
         events << [name: "lastAlarmType", value: (CID_EVENTS[code] ? CID_EVENTS[code][1] : "Event ${code}"), isStateChange: true]
         events << [name: "lastAlarmZone", value: zoneText, isStateChange: true] << [name: "lastAlarmAt", value: at, isStateChange: true]
     }
-    parent?.notifyPartitionEvents(partition, events)
+    return events
 }
 
 // Keeps the last 25 events in memory (the hub restarting empties it) and shows the newest 10 as JSON in

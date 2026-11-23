@@ -719,44 +719,23 @@ def zoneName(Integer zone) {
 def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String suggestedName = null) {
     if (zoneNum == null || zoneNum <= 0) return
 
-    Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
-    Map hint = hints["${zoneNum}"] ?: [:]
-
-    String hintedLabel = hint.label?.trim() ?: null
-    String hintedType  = hint.type?.trim() ?: null
-    String restLabel   = state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
+    Map known = knownZoneNames(zoneNum)
+    String hintedLabel = known.hintedLabel
+    String hintedType  = known.hintedType
 
     String inferredName = suggestedName?.trim()
     String inferredType = suggestedType?.trim()
-    String nameForInference = hintedLabel ?: restLabel ?: inferredName
+    String nameForInference = hintedLabel ?: known.restLabel ?: inferredName
 
     String dni = "uno-zone-${zoneNum}"
     def existing = getChildDevice(dni)
 
-    String finalLabel = hintedLabel ?: restLabel ?: inferredName ?: existing?.label ?: "Zone ${zoneNum}"
+    String finalLabel = nameForInference ?: existing?.label ?: "Zone ${zoneNum}"
 
     if (!existing) {
-        String desiredDriver = driverNameForType(canonicalType(
-            hintedType ?:
-            inferredType ?:
-            inferTypeFromName(nameForInference) ?:
-            settings.defaultUnknownZoneType ?:
-            "contact"
-        ))
-
-        def created = addChildDevice(
-            "uno",
-            desiredDriver,
-            dni,
-            [
-                name       : "UNO Zone ${zoneNum}",
-                label      : finalLabel,
-                isComponent: true
-            ]
-        )
-        applyHealth(created)
-        noteDeviceCreated()
-        logDebug("Created zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
+        String newDriver = driverForNewZone(hintedType, inferredType, nameForInference)
+        addZoneDevice(zoneNum, newDriver, finalLabel)
+        logDebug("Created zone ${zoneNum}: ${finalLabel} (${newDriver})")
         return
     }
 
@@ -764,33 +743,67 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
     String desiredDriver = desiredDriverForExisting(existingTypeName, hintedType, inferredType, nameForInference)
 
     if (existingTypeName && existingTypeName != desiredDriver) {
-        try {
-            deleteChildDevice(dni)
-        } catch (e) {
-            log.warn "Could not recreate zone ${zoneNum}; device is in use: ${e}"
-            return
-        }
-
-        def recreated = addChildDevice(
-            "uno",
-            desiredDriver,
-            dni,
-            [
-                name       : "UNO Zone ${zoneNum}",
-                label      : finalLabel,
-                isComponent: true
-            ]
-        )
-        applyHealth(recreated)
-        noteDeviceCreated()
-        logInfo("Recreated zone ${zoneNum}: ${finalLabel} (${desiredDriver})")
+        recreateZone(zoneNum, desiredDriver, finalLabel)
         return
     }
 
+    relabelZone(existing, zoneNum, finalLabel)
+}
+
+// What the user (zone hints) and the panel's web interface (REST labels) say about a zone.
+private Map knownZoneNames(Integer zoneNum) {
+    Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
+    Map hint = hints["${zoneNum}"] ?: [:]
+    return [
+        hintedLabel: hint.label?.trim() ?: null,
+        hintedType : hint.type?.trim() ?: null,
+        restLabel  : state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
+    ]
+}
+
+// The driver for a zone seen for the first time: a hint wins, then what the event or name suggests, then the default.
+private String driverForNewZone(String hintedType, String inferredType, String nameForInference) {
+    return driverNameForType(canonicalType(
+        hintedType ?:
+        inferredType ?:
+        inferTypeFromName(nameForInference) ?:
+        settings.defaultUnknownZoneType ?:
+        "contact"
+    ))
+}
+
+private void recreateZone(Integer zoneNum, String driver, String label) {
     try {
-        if (existing.label != finalLabel) {
-            existing.setLabel(finalLabel)
-            logDebug("Updated zone ${zoneNum} label to ${finalLabel}")
+        deleteChildDevice("uno-zone-${zoneNum}")
+    } catch (e) {
+        log.warn "Could not recreate zone ${zoneNum}; device is in use: ${e}"
+        return
+    }
+
+    addZoneDevice(zoneNum, driver, label)
+    logInfo("Recreated zone ${zoneNum}: ${label} (${driver})")
+}
+
+private void addZoneDevice(Integer zoneNum, String driver, String label) {
+    def created = addChildDevice(
+        "uno",
+        driver,
+        "uno-zone-${zoneNum}",
+        [
+            name       : "UNO Zone ${zoneNum}",
+            label      : label,
+            isComponent: true
+        ]
+    )
+    applyHealth(created)
+    noteDeviceCreated()
+}
+
+private void relabelZone(def zoneDevice, Integer zoneNum, String label) {
+    try {
+        if (zoneDevice.label != label) {
+            zoneDevice.setLabel(label)
+            logDebug("Updated zone ${zoneNum} label to ${label}")
         }
     } catch (e) {
         log.warn "Unable to relabel zone ${zoneNum}: ${e}"
