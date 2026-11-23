@@ -42,6 +42,11 @@ def mainPage() {
                 title: "Partition names (optional)",
                 description: "One per line as partitionNumber:Name, e.g. 2:Guest House",
                 required: false
+            input "partitionZones", "textarea",
+                title: "Zones per partition (optional)",
+                description: "One per line as partitionNumber:zones, e.g. 1:1-8 and 2:9-16. The UNO doesn't say which partition a zone is in, so tell it here. Each partition then shows only its own open and bypassed zones.",
+                required: false
+            paragraph partitionZonesPreview()
         }
 
         section("Users (optional)") {
@@ -162,18 +167,31 @@ Examples:
             input "recordTestEvents", "bool",
                 title: "Record Contact ID test reports in the event history",
                 defaultValue: false
-            input "heartbeatMinutes", "enum",
-                title: "Heartbeat interval",
-                options: ["1":"Every 1 minute", "5":"Every 5 minutes", "10":"Every 10 minutes"],
-                defaultValue: "1",
+            input "keepaliveSeconds", "enum",
+                title: "Keepalive: poll the UNO every",
+                description: "A poll proves the link is alive. Shorter notices a dead link sooner.",
+                options: ["30":"30 seconds", "60":"1 minute", "300":"5 minutes", "600":"10 minutes"],
+                defaultValue: keepaliveDefault(),
                 required: true
             input "watchdogMinutes", "enum",
                 title: "Reconnect if no frames seen for",
                 options: ["3":"3 minutes", "5":"5 minutes", "10":"10 minutes"],
                 defaultValue: "3",
                 required: true
+            input "commandTimeoutSeconds", "enum",
+                title: "Wait for a command's reply for",
+                description: "A command with no reply is sent once more, and then the connection is restarted. Raise this on a slow or unreliable network.",
+                options: ["2":"2 seconds", "4":"4 seconds", "10":"10 seconds", "20":"20 seconds"],
+                defaultValue: "4",
+                required: true
         }
     }
+}
+
+// An install from before keepalive was in seconds keeps the heartbeat it had.
+private String keepaliveDefault() {
+    Integer minutes = settings.heartbeatMinutes ? safeInt(settings.heartbeatMinutes, 1) : null
+    return minutes ? "${minutes * 60}".toString() : "60"
 }
 
 def installed() {
@@ -227,8 +245,8 @@ def initialize() {
     if (restart) {
         state.startedVersion = appVersion()
         runIn(1, "initializeConnection")
-    } else if (((state.deviceChurn ?: 0) as Integer) > 0) {
-        // New devices know nothing yet, so have the panel announce everything again without reconnecting.
+    } else if (((state.deviceChurn ?: 0) as Integer) > 0 || changed.contains("partitionZones")) {
+        // New devices (and new zone assignments) start knowing nothing, so have the panel announce everything again.
         runIn(1, "resyncConnection")
     }
     state.deviceChurn = 0
@@ -240,7 +258,7 @@ private String appVersion() {
 
 // The settings a running connection cannot pick up on its own.
 private List<String> reconnectSettings() {
-    return ["ip", "port", "password", "restUsername", "useRestMetadata", "zoneCount", "zoneSet", "heartbeatMinutes", "watchdogMinutes"]
+    return ["ip", "port", "password", "restUsername", "useRestMetadata", "zoneCount", "zoneSet", "keepaliveSeconds", "watchdogMinutes"]
 }
 
 private void noteDeviceCreated() {
@@ -377,8 +395,10 @@ private List<String> applyConnectionSettings() {
         useRestMetadata : [settings.useRestMetadata == true, "bool"],
         debugLogging    : [settings.debugLogging == true, "bool"],
         traceLogging    : [settings.traceLogging == true, "bool"],
-        heartbeatMinutes: [(settings.heartbeatMinutes ?: "1").toString(), "enum"],
-        watchdogMinutes : [(settings.watchdogMinutes ?: "3").toString(), "enum"]
+        keepaliveSeconds: [(settings.keepaliveSeconds ?: keepaliveDefault()).toString(), "enum"],
+        watchdogMinutes : [(settings.watchdogMinutes ?: "3").toString(), "enum"],
+        commandTimeoutSeconds: [(settings.commandTimeoutSeconds ?: "4").toString(), "enum"],
+        partitionZones  : [normalizedPartitionZones(), "text"]
     ]
 
     Map pushed = (state.pushedSettings instanceof Map) ? state.pushedSettings : [:]
@@ -548,18 +568,19 @@ private void ensureStatusDevice() {
 // partition a zone belongs to, so with several they stay on the status device).
 def notifyPanelSummary(Map summary) {
     getChildDevice("uno-status")?.with { dev -> summary.each { String n, def v -> dev.sendEvent(name: n, value: v) } }
-    if (configuredPartitions().size() == 1) {
+    if (configuredPartitions().size() == 1 && !hasPartitionZones()) {
         def dev = getChildDevice("uno-partition-${configuredPartitions()[0]}")
         summary.findAll { String n, def v -> n in ["openZones", "bypassedZones"] }.each { String n, def v -> dev?.sendEvent(name: n, value: v) }
     }
 }
 
-// Brings a newly created device up to date from what the connection device already knows.
+// Brings a newly created device up to date from what the connection device already knows. With zones assigned
+// to partitions the connection device sends each partition its own lists, so there is nothing to copy.
 private void applyPanelSummary(def dev) {
     def conn = getChildDevice("uno-connection")
     if (!dev || !conn) return
     boolean isStatus = dev.deviceNetworkId == "uno-status"
-    if (!isStatus && configuredPartitions().size() != 1) return
+    if (!isStatus && (configuredPartitions().size() != 1 || hasPartitionZones())) return
 
     (isStatus ? ["openZones", "bypassedZones", "troubleSummary"] : ["openZones", "bypassedZones"]).each { String n ->
         def v = conn.currentValue(n)
@@ -1033,6 +1054,69 @@ private List<Integer> configuredZones() {
 private List<Integer> configuredPartitions() {
     Map parsed = parseRange(settings.partitionSet, 1, 8)
     return parsed.values ?: [1]
+}
+
+// Reads "partition:zones" lines such as 2:9-16 into [assignments: [partition: [zones]], problems: [text]].
+// Anything that can't be used is left out and reported, so a typo never silently moves a zone.
+private Map parsePartitionZones(def spec) {
+    Map<Integer, List<Integer>> assignments = new TreeMap<Integer, List<Integer>>()
+    List<String> problems = []
+    Map<Integer, Integer> owner = [:]
+    List<Integer> zones = configuredZones()
+    List<Integer> partitions = configuredPartitions()
+
+    (spec ?: "").toString().split("[\\r\\n;]+").each { String raw ->
+        String line = raw.trim()
+        if (!line) return
+
+        int colon = line.indexOf(":")
+        Integer partition = colon > 0 ? safeInt(line.substring(0, colon).trim(), 0) : 0
+        if (partition < 1) {
+            problems << "'${line}' is not partition:zones".toString()
+            return
+        }
+        if (!partitions.contains(partition)) {
+            problems << "partition ${partition} is not one of the partitions you create".toString()
+            return
+        }
+
+        Map parsed = parseRange(line.substring(colon + 1), 1, 128)
+        if (parsed.invalid) problems << "not valid zone numbers: ${parsed.invalid.join(', ')}".toString()
+        List<Integer> mine = []
+        parsed.values.each { Integer z ->
+            if (!zones.contains(z)) {
+                problems << "zone ${z} is not one of your zones".toString()
+            } else if (owner.containsKey(z)) {
+                problems << "zone ${z} is already in partition ${owner[z]}".toString()
+            } else {
+                owner[z] = partition
+                mine << z
+            }
+        }
+        assignments[partition] = ((assignments[partition] ?: []) + mine).sort()
+    }
+
+    return [assignments: assignments, problems: problems, unassigned: zones.findAll { !owner.containsKey(it) }]
+}
+
+private boolean hasPartitionZones() {
+    return !parsePartitionZones(settings.partitionZones).assignments.isEmpty()
+}
+
+// The validated assignments in the compact form the connection device reads, e.g. "1:1,2,3;2:9,10".
+private String normalizedPartitionZones() {
+    Map<Integer, List<Integer>> assignments = parsePartitionZones(settings.partitionZones).assignments
+    return assignments.collect { Integer p, List<Integer> zs -> "${p}:${zs.join(',')}".toString() }.join(";")
+}
+
+private String partitionZonesPreview() {
+    Map parsed = parsePartitionZones(settings.partitionZones)
+    if (!parsed.assignments && !parsed.problems) return "No zones assigned: with one partition its device shows every open zone, with several only the status device does."
+
+    List<String> lines = parsed.assignments.collect { Integer p, List<Integer> zs -> "Partition ${p}: ${zs.size()} zone${zs.size() == 1 ? '' : 's'} (${zs.join(', ')})".toString() }
+    if (parsed.assignments && parsed.unassigned) lines << "Not assigned (shown only in the panel-wide lists): ${parsed.unassigned.join(', ')}".toString()
+    parsed.problems.each { String p -> lines << "Ignored: ${p}".toString() }
+    return lines.join("\n")
 }
 
 private String rangePreview(def spec, Integer min, Integer max, String noun, String fallback) {

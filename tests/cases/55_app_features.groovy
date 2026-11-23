@@ -7,8 +7,8 @@ k.section("Saving only restarts the connection when it has to") {
     def (a, env) = k.newApp([zoneCount: 3])
     a.initialize()
     def conn = env.children["uno-connection"]
-    k.check("the first save pushes every setting and starts the connection", conn.settingsUpdated.size() == 16 && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated.size(), a.pending])
-    k.check("the password is never copied into the app's state", a.state.pushedSettings.size() == 16 && a.state.pushedSettings.values().every { !it.contains("pw") }, a.state.pushedSettings)
+    k.check("the first save pushes every setting and starts the connection", conn.settingsUpdated.size() == 18 && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated.size(), a.pending])
+    k.check("the password is never copied into the app's state", a.state.pushedSettings.size() == 18 && a.state.pushedSettings.values().every { !it.contains("pw") }, a.state.pushedSettings)
 
     a.pending.clear(); conn.settingsUpdated.clear()
     a.updated()
@@ -27,7 +27,7 @@ k.section("Saving only restarts the connection when it has to") {
     a.updated()
     k.check("a new address is pushed and restarts it", conn.settingsUpdated*.getAt(0) == ["ip"] && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated, a.pending])
 
-    ["port": 4026, "password": "other", "zoneCount": 4, "zoneSet": "1-2", "heartbeatMinutes": "5", "watchdogMinutes": "5", "restUsername": "bob"].each { String name, def value ->
+    ["port": 4026, "password": "other", "zoneCount": 4, "zoneSet": "1-2", "keepaliveSeconds": "300", "watchdogMinutes": "5", "restUsername": "bob"].each { String name, def value ->
         a.pending.clear()
         a.settings[name] = value
         a.updated()
@@ -52,7 +52,7 @@ k.section("Saving only restarts the connection when it has to") {
     a.pending.clear()
     a.updated()
     def fresh = env.children["uno-connection"]
-    k.check("a recreated connection device gets every setting again", fresh.settingsUpdated.size() == 16 && a.pending.containsKey("initializeConnection"), fresh.settingsUpdated.size())
+    k.check("a recreated connection device gets every setting again", fresh.settingsUpdated.size() == 18 && a.pending.containsKey("initializeConnection"), fresh.settingsUpdated.size())
 }
 
 k.section("Status device and panel summary") {
@@ -252,4 +252,65 @@ k.section("Arm with bypass is passed through") {
     a.initialize()
     a.armStayBypass(2, "1234"); a.armAwayBypass()
     k.check("to the connection device", env.children["uno-connection"].callArgs.containsAll([["armStayBypass", [2, "1234"]], ["armAwayBypass", [1, null]]]), env.children["uno-connection"].callArgs)
+}
+
+k.section("Zones per partition") {
+    def (a, env) = k.newApp([zoneCount: 5, partitionSet: "1-2", partitionZones: "1:1-3\n2:4-5"])
+    a.initialize()
+    def conn = env.children["uno-connection"]
+    k.check("the validated assignments are pushed in compact form", conn.settingsUpdated.any { it[0] == "partitionZones" && it[1].value == "1:1,2,3;2:4,5" }, conn.settingsUpdated.findAll { it[0] == "partitionZones" })
+    k.check("the preview says what each partition gets", a.partitionZonesPreview().contains("Partition 1: 3 zones (1, 2, 3)") && a.partitionZonesPreview().contains("Partition 2: 2 zones (4, 5)") && !a.partitionZonesPreview().contains("Ignored"), a.partitionZonesPreview())
+
+    def (b, envB) = k.newApp([zoneCount: 5, partitionSet: "1-2", partitionZones: "1:1-3;2:3,4,9\n3:1\nnonsense\n1:x"])
+    b.initialize()
+    String preview = b.partitionZonesPreview()
+    k.check("a zone can't be in two partitions", preview.contains("zone 3 is already in partition 1"), preview)
+    k.check("a zone that isn't configured is ignored", preview.contains("zone 9 is not one of your zones"), preview)
+    k.check("a partition that isn't created is ignored", preview.contains("partition 3 is not one of the partitions you create"), preview)
+    k.check("a line that isn't partition:zones is reported", preview.contains("'nonsense' is not partition:zones") && preview.contains("not valid zone numbers: x"), preview)
+    k.check("zones left out are listed as unassigned", preview.contains("Not assigned") && preview.contains("5"), preview)
+    k.check("only the valid part is pushed", envB.children["uno-connection"].settingsUpdated.any { it[0] == "partitionZones" && it[1].value == "1:1,2,3;2:4" }, envB.children["uno-connection"].settingsUpdated.findAll { it[0] == "partitionZones" })
+
+    def (n, envN) = k.newApp([zoneCount: 5])
+    n.initialize()
+    k.check("nothing pushed means no assignments", envN.children["uno-connection"].settingsUpdated.any { it[0] == "partitionZones" && it[1].value == "" } && n.partitionZonesPreview().startsWith("No zones assigned"))
+
+    // With one partition and no assignments the panel-wide lists are copied to it; assignments take over from that.
+    def (m, envM) = k.newApp([zoneCount: 5, partitionZones: "1:1-2"])
+    m.initialize()
+    m.notifyPanelSummary([openZones: "zone 4", bypassedZones: "none"])
+    k.check("with assignments the app no longer copies the panel-wide lists to the partition", envM.children["uno-partition-1"].last("openZones") == null, envM.children["uno-partition-1"].events)
+    envM.children["uno-connection"].sendEvent(name: "openZones", value: "zone 4")
+    m.applyPanelSummary(envM.children["uno-partition-1"])
+    k.check("nor to a newly created partition device", envM.children["uno-partition-1"].last("openZones") == null)
+
+    // Changing assignments re-announces without a reconnect.
+    conn.settingsUpdated.clear(); a.pending.clear()
+    a.settings.partitionZones = "1:1-2\n2:3-5"
+    a.updated()
+    k.check("a changed assignment is pushed, and the panel is asked to announce again without reconnecting", conn.settingsUpdated*.getAt(0) == ["partitionZones"] && a.pending.containsKey("resyncConnection") && !a.pending.containsKey("initializeConnection"), [conn.settingsUpdated, a.pending])
+}
+
+k.section("Keepalive and command timeout settings") {
+    def (a, env) = k.newApp([zoneCount: 1])
+    a.initialize()
+    def conn = env.children["uno-connection"]
+    def pushed = { String n -> conn.settingsUpdated.findAll { it[0] == n }*.getAt(1)*.value }
+    k.check("keepalive is a minute and the timeout 4 seconds by default", pushed("keepaliveSeconds") == ["60"] && pushed("commandTimeoutSeconds") == ["4"], [pushed("keepaliveSeconds"), pushed("commandTimeoutSeconds")])
+    k.check("the old heartbeat setting is no longer pushed", !conn.settingsUpdated.any { it[0] == "heartbeatMinutes" })
+
+    a.pending.clear(); conn.settingsUpdated.clear()
+    a.settings.commandTimeoutSeconds = "10"
+    a.updated()
+    k.check("a new command timeout is pushed without a restart", pushed("commandTimeoutSeconds") == ["10"] && !a.pending.containsKey("initializeConnection"), a.pending)
+
+    a.settings.keepaliveSeconds = "30"
+    a.updated()
+    k.check("a new keepalive restarts the connection so the schedule changes", pushed("keepaliveSeconds") == ["30"] && a.pending.containsKey("initializeConnection"), a.pending)
+
+    def (o, envO) = k.newApp([zoneCount: 1, heartbeatMinutes: "5"])
+    k.check("an install from before keeps its heartbeat as the keepalive", o.keepaliveDefault() == "300")
+    o.initialize()
+    k.check("and pushes it", envO.children["uno-connection"].settingsUpdated.any { it[0] == "keepaliveSeconds" && it[1].value == "300" })
+    k.check("a new install defaults to a minute", k.newApp([zoneCount: 1])[0].keepaliveDefault() == "60")
 }

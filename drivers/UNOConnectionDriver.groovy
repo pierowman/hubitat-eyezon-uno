@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Field static final ConcurrentHashMap ZONE_CACHE = new ConcurrentHashMap()   // zone settings -> zone list
 @Field static final ConcurrentHashMap CID_SEEN = new ConcurrentHashMap()     // "<device>:<zone>" -> time of the last fast-path event
 @Field static final ConcurrentHashMap HISTORY = new ConcurrentHashMap()      // device id -> recent events, newest first
+@Field static final ConcurrentHashMap PARTITION_SEEN = new ConcurrentHashMap() // "<device>:<partition>:<attribute>" -> last value sent
 
 metadata {
     definition(name: "UNO Connection", namespace: "uno", author: "Eric Hess",
@@ -96,8 +97,10 @@ metadata {
         input name: "useRestMetadata", type: "bool", title: "Enable REST metadata/startup sync", defaultValue: true
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
         input name: "traceLogging", type: "bool", title: "Enable trace logging", defaultValue: false
-        input name: "heartbeatMinutes", type: "enum", title: "Heartbeat interval", options: ["1":"Every 1 minute", "5":"Every 5 minutes", "10":"Every 10 minutes"], defaultValue: "1", required: true
+        input name: "keepaliveSeconds", type: "enum", title: "Keepalive: poll the UNO every", options: ["30":"30 seconds", "60":"1 minute", "300":"5 minutes", "600":"10 minutes"], defaultValue: "60", required: true
         input name: "watchdogMinutes", type: "enum", title: "Reconnect if no frames seen for", options: ["3":"3 minutes", "5":"5 minutes", "10":"10 minutes"], defaultValue: "3", required: true
+        input name: "commandTimeoutSeconds", type: "enum", title: "Wait for a command's reply for", options: ["2":"2 seconds", "4":"4 seconds", "10":"10 seconds", "20":"20 seconds"], defaultValue: "4", required: true
+        input name: "partitionZones", type: "text", title: "Zones per partition (set by the app, e.g. 1:1-8;2:9-16)", required: false
     }
 }
 
@@ -136,7 +139,7 @@ def initialize() {
     // Earlier versions kept these in state.
     state.remove("lastCidByZone")
     state.remove("eventHistory")
-    clearCidSeen()
+    clearSeen()
     state.restStartupDone = false
     state.authFailed = false
 
@@ -150,7 +153,7 @@ def initialize() {
     if (device.currentValue("eventHistory") == null) sendEvent(name: "eventHistory", value: "[]")
     if (device.currentValue("healthStatus") == null) sendEvent(name: "healthStatus", value: "offline")
     // How long the connection may stay silent before the device is considered offline, in seconds.
-    sendEvent(name: "checkInterval", value: safeInt(settings.heartbeatMinutes, 1) * 60 * 2)
+    sendEvent(name: "checkInterval", value: keepaliveSeconds() * 2)
 
     scheduleHealthChecks()
     reconnect()
@@ -159,25 +162,38 @@ def initialize() {
 private void scheduleHealthChecks() {
     state.heartbeatTick = 0
     runEvery1Minute("minuteCheck")
-    logDebug("Scheduled heartbeat=${settings.heartbeatMinutes ?: '1'}m watchdog=${settings.watchdogMinutes ?: '3'}m")
+    logDebug("Scheduled keepalive=${keepaliveSeconds()}s watchdog=${settings.watchdogMinutes ?: '3'}m command timeout=${commandTimeoutSeconds()}s")
+}
+
+// How often to poll the UNO to prove the link is alive. An older install only has heartbeatMinutes.
+private Integer keepaliveSeconds() {
+    Integer secs = settings.keepaliveSeconds != null ? safeInt(settings.keepaliveSeconds, 60) : safeInt(settings.heartbeatMinutes, 1) * 60
+    return Math.max(secs, 30)
 }
 
 // One schedule drives both checks. The configured "no frames" threshold is applied inside watchdogCheck.
 def minuteCheck() {
-    int every = Math.max(safeInt(settings.heartbeatMinutes, 1), 1)
-    if (every > 1) {
+    int secs = keepaliveSeconds()
+    if (secs <= 30) {
+        // Twice a minute: now, and again half a minute later.
+        heartbeatCheck()
+        runIn(30, "heartbeatCheck")
+    } else if (secs <= 60) {
+        heartbeatCheck()
+    } else {
+        int every = secs.intdiv(60)
         int tick = safeInt(state.heartbeatTick, 0) + 1
         state.heartbeatTick = tick >= every ? 0 : tick
         if (tick >= every) heartbeatCheck()
-    } else {
-        heartbeatCheck()
     }
     watchdogCheck()
 }
 
-private void clearCidSeen() {
+// Forgets what was last reported for this device, so everything is sent again.
+private void clearSeen() {
     String prefix = "${device.id}:".toString()
     CID_SEEN.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> CID_SEEN.remove(k) }
+    PARTITION_SEEN.keySet().findAll { String k -> k.startsWith(prefix) }.each { String k -> PARTITION_SEEN.remove(k) }
 }
 
 def reconnect() {
@@ -335,6 +351,7 @@ def resyncStates() {
     state.troubleBytes = [:]
     state.zoneTemps = [:]
     state.partitionTemps = [:]
+    clearSeen()
     refreshAll()
 }
 
@@ -512,7 +529,7 @@ def debugDump() {
     lines << "UNO Connection ${driverVersion()}"
     lines << "connection: ${device.currentValue('connectionState')}, health ${state.health ?: 'unknown'}, logged in ${state.loggedIn == true}, password rejected ${state.authFailed == true}"
     lines << "panel: ${model ?: 'unknown'}, firmware ${firmware ?: 'unknown'}, MAC ${mac ?: 'unknown'}"
-    lines << "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, heartbeat ${settings.heartbeatMinutes ?: '1'}m, watchdog ${settings.watchdogMinutes ?: '3'}m"
+    lines << "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, keepalive ${keepaliveSeconds()}s, watchdog ${settings.watchdogMinutes ?: '3'}m, command timeout ${commandTimeoutSeconds()}s"
     lines << "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})"
     lines << "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
     lines << "timing: last frame ${secondsSince(state.lastFrameTs)}, last reconnect ${secondsSince(state.lastReconnectTs)}, reconnect delay ${state.reconnectDelay ?: 2}s"
@@ -561,11 +578,11 @@ def watchdogCheck() {
     long lastTs = (state.lastFrameTs ?: 0L) as Long
     if (lastTs == 0L) return
 
-    // Never trip faster than the heartbeat, or an idle panel would be reconnected needlessly.
-    Integer wdMinutes = Math.max(safeInt(settings.watchdogMinutes, 3), safeInt(settings.heartbeatMinutes, 1) + 1)
+    // Never trip faster than a minute past the keepalive, or an idle panel would be reconnected needlessly.
+    Integer wdSeconds = Math.max(safeInt(settings.watchdogMinutes, 3) * 60, keepaliveSeconds() + 60)
 
     long ageSeconds = (now() - lastTs) / 1000L
-    if (ageSeconds > (wdMinutes * 60)) {
+    if (ageSeconds > wdSeconds) {
         logWarn("Watchdog reconnect: no frames for ${ageSeconds}s")
         reconnect()
     }
@@ -724,9 +741,15 @@ private void releaseSecret(def c) {
     if (c?.secretKey) CODE_VAULT.remove(c.secretKey)
 }
 
-// A command that hasn't been sent within this time is dropped rather than run late.
+// How long to wait for the UNO to answer a command before re-sending it (once) and then giving up.
+private Integer commandTimeoutSeconds() {
+    return Math.min(Math.max(safeInt(settings.commandTimeoutSeconds, 4), 1), 60)
+}
+
+// A command that hasn't been sent within this time is dropped rather than run late. A longer reply timeout
+// lets a command wait behind slower ones, so the limit grows with it.
 private Integer queueMaxAgeSeconds() {
-    return 30
+    return Math.max(30, commandTimeoutSeconds() * 4)
 }
 
 def expireQueue() {
@@ -826,7 +849,7 @@ private void sendInFlight() {
     String cmd = tpiCommand(inflight.cc as String, data)
     String logCmd = tpiCommand(inflight.cc as String, (inflight.log ?: data) as String)
     rawSend(cmd + "\r\n", logCmd + "\r\n")
-    runIn(4, "commandTimeoutCheck")
+    runIn(commandTimeoutSeconds(), "commandTimeoutCheck")
 }
 
 // Re-sends a command the panel rejected as busy (response code 1), after a back-off delay.
@@ -845,7 +868,8 @@ def commandTimeoutCheck() {
     if (!inflight || inflight.waiting) return
 
     long ageMs = now() - (inflight.sentAt as Long)
-    if (ageMs < 3500L) return
+    // The timer fires on the second, so allow half a second of slack.
+    if (ageMs < (commandTimeoutSeconds() * 1000L - 500L)) return
 
     if (!inflight.noRetry && (inflight.retries as Integer) < 1) {
         inflight.retries = ((inflight.retries as Integer) + 1)
@@ -1294,14 +1318,66 @@ private void publishZoneSummary() {
     Map changed = [:]
     if (device.currentValue("openZones") != open) changed.openZones = open
     if (device.currentValue("bypassedZones") != bypassed) changed.bypassedZones = bypassed
-    if (!changed) return
-
-    changed.each { String name, String value -> sendEvent(name: name, value: value) }
-    try {
-        parent?.notifyPanelSummary(changed)
-    } catch (e) {
-        logDebug("Failed to forward the zone summary: ${e}")
+    if (changed) {
+        changed.each { String name, String value -> sendEvent(name: name, value: value) }
+        try {
+            parent?.notifyPanelSummary(changed)
+        } catch (e) {
+            logDebug("Failed to forward the zone summary: ${e}")
+        }
     }
+
+    publishPartitionZones()
+}
+
+// With zones assigned to partitions, each partition device gets the lists for its own zones only.
+// What was last sent is remembered in memory so an unchanged list isn't sent again.
+private void publishPartitionZones() {
+    partitionZoneMap().each { Integer partition, List<Integer> mine ->
+        List events = []
+        [openZones: zoneList(mine, state.lastZoneBitmap), bypassedZones: zoneList(mine, state.lastBypassBitmap)].each { String name, String value ->
+            String key = "${device.id}:${partition}:${name}".toString()
+            if (PARTITION_SEEN.get(key) != value) {
+                PARTITION_SEEN.put(key, value)
+                events << [name: name, value: value]
+            }
+        }
+        if (!events) return
+        try {
+            parent?.notifyPartitionEvents(partition, events)
+        } catch (e) {
+            logDebug("Failed to forward the zone lists to partition ${partition}: ${e}")
+        }
+    }
+}
+
+// "1:1-8;2:9-16" (or one assignment per line) -> [1: [1..8], 2: [9..16]]. Only configured zones count, and a
+// zone listed twice stays with the first partition. The app validates and normalises what it sends.
+private Map<Integer, List<Integer>> partitionZoneMap() {
+    String text = (settings.partitionZones ?: "").toString().trim()
+    if (!text) return [:]
+
+    String key = "pz|${text}|${settings.zoneSet}|${settings.zoneCount}".toString()
+    Map<Integer, List<Integer>> cached = (Map<Integer, List<Integer>>) ZONE_CACHE.get(key)
+    if (cached != null) return cached
+
+    Set<Integer> valid = configuredZones() as Set<Integer>
+    Set<Integer> taken = new HashSet<Integer>()
+    Map<Integer, List<Integer>> result = new TreeMap<Integer, List<Integer>>()
+
+    text.split("[;\\n]").each { String line ->
+        int colon = line.indexOf(":")
+        if (colon < 0) return
+        Integer partition = safeParseInt(line.substring(0, colon).trim(), 0)
+        if (partition < 1 || partition > 8) return
+
+        List<Integer> zones = parseRange(line.substring(colon + 1), 1, 128).values.findAll { Integer z -> valid.contains(z) && taken.add(z) }
+        result[partition] = ((result[partition] ?: []) + zones).sort()
+    }
+
+    if (ZONE_CACHE.size() > 16) ZONE_CACHE.clear()
+    ZONE_CACHE.put(key, result)
+    return result
 }
 
 private String zoneList(List<Integer> zones, String bitmap) {
