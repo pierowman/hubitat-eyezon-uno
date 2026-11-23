@@ -947,6 +947,14 @@ def parse(String message) {
         String frame = buffer.substring(0, endIdx).trim()
         buffer = buffer.substring(endIdx + 1)
 
+        // Every frame starts at its own % (or ^ for an acknowledgement). One found inside a frame means the data
+        // before it was cut short, so only the last frame is kept instead of losing both to a failed parse.
+        int restart = Math.max(frame.lastIndexOf('%'), frame.lastIndexOf('^'))
+        if (restart > 0) {
+            logDebug("Dropped truncated data before a new frame: ${redact(frame.substring(0, restart)).take(80)}")
+            frame = frame.substring(restart)
+        }
+
         if (frame) {
             // One bad frame must not stop the rest of the buffer from being processed.
             try {
@@ -964,6 +972,13 @@ def parse(String message) {
             buffer = ""
             parseFrame(pending)
         }
+    }
+
+    // The longest real frame (zone timers) is about 520 characters. Far more than that with no terminator is
+    // damaged data, and keeping it would grow the hub's state for ever.
+    if (buffer.length() > 4096) {
+        logWarn("Dropped ${buffer.length()} characters from the receive buffer: no frame terminator")
+        buffer = ""
     }
 
     state.rxBuffer = buffer

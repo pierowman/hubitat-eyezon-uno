@@ -302,6 +302,7 @@ See [docs/example-rule-machine.md](docs/example-rule-machine.md) and [docs/examp
 - **No reply:** a command that gets no answer within the command timeout is re-sent once; if there is still none, the connection is reset.
 - **Health:** every device reports `healthStatus` `online` once the UNO has accepted the login. If the connection stays down for 30 seconds the devices go `offline`, so a brief reconnect doesn't flap them.
 - **Errors:** a malformed or unexpected frame is logged and skipped; it does not stop the frames behind it.
+- **Truncated data:** if a frame is cut short and the next one starts before it ended, only the damaged frame is lost, not the good one that follows. Data with no frame terminator is dropped (with a warning) once it passes 4,096 characters, so damaged data can't grow the hub's state without limit. Damaged data never disconnects.
 
 ## REST metadata and startup sync
 
