@@ -141,7 +141,11 @@ k.section("The settings page offers a name and type for each configured zone") {
     def (a, env) = k.newApp([zoneCount: 5, zoneSet: "1-2,5", useRestMetadata: false], meta(["Basement Back Do", "Foyer Motion Sen"]))
     def inputs = [:]
     a.metaClass.dynamicPage = { Map m, Closure c -> c() }
-    a.metaClass.section = { Object... args -> (args.last() as Closure).call() }
+    def titles = []
+    a.metaClass.section = { Object... args ->
+        titles << args.find { it instanceof CharSequence }.toString().replaceAll("<[^>]+>", "")
+        (args.last() as Closure).call()
+    }
     a.metaClass.paragraph = { Object... args -> null }
     // Hubitat's input takes its named arguments (a Map) first, then the name and type: a Map given last doesn't match
     // and the page fails to open on a real hub. The stand-in refuses that shape too.
@@ -157,4 +161,11 @@ k.section("The settings page offers a name and type for each configured zone") {
     k.check("each name box is pre-filled with the UNO's name, with no 'UNO name:' label", inputs["zoneName_1"].defaultValue == "Basement Back Do" && inputs["zoneName_2"].defaultValue == "Foyer Motion Sen" && inputs["zoneName_1"].description == null, [inputs["zoneName_1"]])
     k.check("a zone the UNO has no name for is left empty", inputs["zoneName_5"].defaultValue == null && inputs["zoneName_5"].description == "No name stored on the UNO", inputs["zoneName_5"])
     k.check("the button is on the page", inputs.containsKey("loadZoneNames"))
+
+    // The page is long, so each section is a titled, numbered bar.
+    k.check("the sections are in order, each with a plain title", titles == ["Status", "1. Connect to your UNO", "2. Names and startup state from the UNO (optional)", "3. Partitions", "4. Zones to track",
+        "5. Zone names and types (optional)", "6. Zone hints (the older way to name zones, optional)", "7. Name prefix for partitions and zones (optional)", "8. Users (optional)", "9. PGM outputs (optional)",
+        "10. Status device and stale sensors (optional)", "11. Notifications (optional)", "12. Safety: panic commands and arming codes", "13. Connection tuning and logging"], titles)
+    k.check("the numbers run without a gap", titles.drop(1).withIndex().every { String t, int i -> t.startsWith("${i + 1}. ") }, titles)
+    k.check("a title is drawn as a bar, and a section hint as grey text", a.heading("X").contains("background-color") && a.hint("Y").contains("color:#666666"))
 }

@@ -16,11 +16,13 @@ preferences {
 
 def mainPage() {
     dynamicPage(name: "mainPage", install: true, uninstall: true) {
-        section("Status") {
+        section(heading("Status")) {
             paragraph statusSummary()
+            paragraph hint("The sections below are numbered. Each says what it is for, and the ones marked optional can be left alone. Press Done at the bottom to save.")
         }
 
-        section("UNO Connection") {
+        section(heading("1. Connect to your UNO")) {
+            paragraph hint("Where the UNO is on your network, and the password for it.")
             input "ip", "text", title: "UNO IP Address", required: true
             input "port", "number", title: "UNO Port", defaultValue: 4025, required: true
             input "password", "password", title: "UNO Local/TPI Password", required: true
@@ -28,7 +30,16 @@ def mainPage() {
             input "masterCode", "password", title: "Master Code (optional, for disarm)", required: false
         }
 
-        section("Partitions") {
+        section(heading("2. Names and startup state from the UNO (optional)")) {
+            paragraph hint("The UNO's web interface holds the names of your zones and partitions and the state of everything at startup.")
+            input "useRestMetadata", "bool",
+                title: "Enable REST metadata and startup sync",
+                defaultValue: true
+            paragraph "Uses UNO REST endpoint D for labels and endpoint A for startup zone-state sync. TPI remains the real-time event engine."
+        }
+
+        section(heading("3. Partitions")) {
+            paragraph hint("Which partitions to create, what to call them, and which zones belong to which.")
             input "partitionSet", "text",
                 title: "Partitions to create (e.g. 1 or 1-2 or 1,3)",
                 description: "The UNO supports partitions 1-8. Leave blank for partition 1 only.",
@@ -51,30 +62,8 @@ def mainPage() {
             paragraph partitionZonesPreview()
         }
 
-        section("Users (optional)") {
-            input "userNames", "textarea",
-                title: "User names",
-                description: "One per line as userNumber:Name, e.g. 2:Alice. Used to say who armed or disarmed. Unnamed users show as 'user N'.",
-                required: false
-        }
-
-        section("Device names (optional)") {
-            input "devicePrefix", "text",
-                title: "Device name prefix",
-                description: "Put in front of the name of every partition and zone, so they sort together on the Devices page, for example 'Alarm' gives 'Alarm Front Door'. Leave empty for none. Longer than ${maxPrefix()} characters is cut, and a whole name is cut at ${maxLabel()}.",
-                submitOnChange: true,
-                required: false
-            paragraph "Example: ${prefixedLabel('Front Door')}. The UNO itself keeps only 16 characters of each zone name, so use the zone names below for longer ones."
-        }
-
-        section("REST Metadata / Startup Sync") {
-            input "useRestMetadata", "bool",
-                title: "Enable REST metadata and startup sync",
-                defaultValue: true
-            paragraph "Uses UNO REST endpoint D for labels and endpoint A for startup zone-state sync. TPI remains the real-time event engine."
-        }
-
-        section("Zone Discovery") {
+        section(heading("4. Zones to track")) {
+            paragraph hint("Which zones to create and keep up to date. Unused zones need no device, so list only the ones you have.")
             input "zoneCount", "number", title: "Configured Zone Count", defaultValue: 27, required: true, submitOnChange: true
             input "zoneSet", "text",
                 title: "Zone set (optional, e.g. 1-8,12,20-27)",
@@ -100,7 +89,8 @@ def mainPage() {
                 required: true
         }
 
-        section("Zone names and types (optional)", hideable: true, hidden: true) {
+        section(heading("5. Zone names and types (optional)"), hideable: true, hidden: true) {
+            paragraph hint("Open this section to rename a zone or set what kind of sensor it is. Tap the title to expand it.")
             paragraph "The names the UNO has stored for your zones are filled in as suggestions. Edit any of them to rename the zone (the UNO keeps only 16 characters of each name, so a longer one has to be typed here). A name or type chosen here wins over Zone Hints. Press Done to apply."
             input "loadZoneNames", "button", title: "Load zone names from the UNO"
             paragraph zoneNamesStatus()
@@ -120,7 +110,8 @@ def mainPage() {
             }
         }
 
-        section("Zone Hints (optional fallback / override)") {
+        section(heading("6. Zone hints (the older way to name zones, optional)")) {
+            paragraph hint("Names and types typed as lines of text. The boxes in section 5 win over these, so most people can skip this.")
             paragraph """One zone per line.
 Format:
 zoneNumber:Label:type
@@ -137,18 +128,26 @@ Examples:
             input "zoneHints", "textarea", title: "Zone Hints", required: false
         }
 
-        section("Safety") {
-            input "requireCodeToArm", "bool",
-                title: "Require the master code to arm",
-                defaultValue: false
-            paragraph "Off by default. When on, Arm Stay / Arm Away only work if a code is passed (for example the *WithCode commands) and it matches the master code above. The UNO's arm commands take no code, so this is checked here, not by the UNO. It also blocks arming from HSM or a dashboard keypad, which don't send a code."
-            input "enablePanic", "bool",
-                title: "Allow panic commands (fire / medical / police)",
-                defaultValue: false
-            paragraph "Off by default. If your UNO is professionally monitored, a panic command contacts emergency services. When off, panic commands are ignored."
+        section(heading("7. Name prefix for partitions and zones (optional)")) {
+            paragraph hint("Text put in front of each partition and zone name, so they sort together on the Devices page.")
+            input "devicePrefix", "text",
+                title: "Device name prefix",
+                description: "Put in front of the name of every partition and zone, so they sort together on the Devices page, for example 'Alarm' gives 'Alarm Front Door'. Leave empty for none. Longer than ${maxPrefix()} characters is cut, and a whole name is cut at ${maxLabel()}.",
+                submitOnChange: true,
+                required: false
+            paragraph "Example: ${prefixedLabel('Front Door')}. The UNO itself keeps only 16 characters of each zone name, so use the zone names in section 5 for longer ones."
         }
 
-        section("PGM Outputs (optional)") {
+        section(heading("8. Users (optional)")) {
+            paragraph hint("Names for the user numbers on your panel, so events say who armed or disarmed.")
+            input "userNames", "textarea",
+                title: "User names",
+                description: "One per line as userNumber:Name, e.g. 2:Alice. Used to say who armed or disarmed. Unnamed users show as 'user N'.",
+                required: false
+        }
+
+        section(heading("9. PGM outputs (optional)")) {
+            paragraph hint("Buttons for the panel's PGM outputs, such as a garage door.")
             input "pgmSet", "text",
                 title: "PGM outputs to create (1-14, e.g. 1 or 1,3-4)",
                 description: "UNO only. Each becomes a button that toggles or pulses the output, depending on how the output is programmed on the panel. The UNO reports no state for a PGM.",
@@ -161,7 +160,8 @@ Examples:
                 required: false
         }
 
-        section("Status device and stale sensors (optional)") {
+        section(heading("10. Status device and stale sensors (optional)")) {
+            paragraph hint("One device summarising open zones, bypassed zones and troubles, for a dashboard tile.")
             input "createStatusDevice", "bool",
                 title: "Create a UNO Status device",
                 description: "One device showing which zones are open or bypassed, the troubles, and stale sensors, for dashboard tiles. Needs the UNO Status driver.",
@@ -173,7 +173,8 @@ Examples:
                 required: false
         }
 
-        section("Notifications (optional)") {
+        section(heading("11. Notifications (optional)")) {
+            paragraph hint("Messages to your phone or another notification device when something happens.")
             input "notifyDevices", "capability.notification",
                 title: "Send notifications to",
                 multiple: true,
@@ -194,7 +195,20 @@ Examples:
                 required: false
         }
 
-        section("Logging / Health") {
+        section(heading("12. Safety: panic commands and arming codes")) {
+            paragraph hint("Both are off by default. Read what each does before turning it on.")
+            input "requireCodeToArm", "bool",
+                title: "Require the master code to arm",
+                defaultValue: false
+            paragraph "Off by default. When on, Arm Stay / Arm Away only work if a code is passed (for example the *WithCode commands) and it matches the master code in section 1. The UNO's arm commands take no code, so this is checked here, not by the UNO. It also blocks arming from HSM or a dashboard keypad, which don't send a code."
+            input "enablePanic", "bool",
+                title: "Allow panic commands (fire / medical / police)",
+                defaultValue: false
+            paragraph "Off by default. If your UNO is professionally monitored, a panic command contacts emergency services. When off, panic commands are ignored."
+        }
+
+        section(heading("13. Connection tuning and logging")) {
+            paragraph hint("Leave these alone unless you are troubleshooting or the connection drops on your network.")
             input "debugLogging", "bool", title: "Enable debug logging", defaultValue: false
             input "traceLogging", "bool", title: "Enable trace logging", defaultValue: false
             input "diagnosticEvents", "bool",
@@ -223,6 +237,18 @@ Examples:
                 required: true
         }
     }
+}
+
+// ---- Page layout ----
+
+// Section titles are drawn as coloured bars, so the sections stand out from one another on a long page.
+private String heading(String text) {
+    return "<div style='color:#ffffff;font-weight:bold;background-color:#1A77C9;padding:4px 8px;border-radius:3px'>${text}</div>".toString()
+}
+
+// A short grey line under a section title saying what the section is for.
+private String hint(String text) {
+    return "<span style='color:#666666;font-size:90%'>${text}</span>".toString()
 }
 
 // An install from before keepalive was in seconds keeps the heartbeat it had.

@@ -14,7 +14,7 @@
 ## Upgrading from an earlier version
 
 - **Version 1.4.0 moves the partition and zone devices under the UNO Connection device**, so the Devices page lists them there instead of as separate entries. Hubitat only nests a device under another device, not under an app, so the app can't make them any more. The first **Done** after upgrading removes the old zone and partition devices and the connection device makes new ones with the same device network IDs (`uno-zone-N`, `uno-partition-N`), and a zone keeps the name its old device had. **They are new devices to Hubitat**, so a rule, dashboard tile or Maker API entry that used one has to be pointed at the new device. If a device is in use, Hubitat may refuse to delete it: the app logs which one, and until it is removed (stop using it in the rule or tile, then press **Done** again) the new one can't be made.
-- Zone names are kept, but names you want to change can be edited under **Zone names and types** in the app, which now pre-fills each with the UNO's own name.
+- Zone names are kept, but names you want to change can be edited under **5. Zone names and types** in the app, which now pre-fills each with the UNO's own name.
 - Update all drivers and the app together (HPM does this), then press **Done**. The connection device then makes the devices a second or two later.
 - The partition 1 device name used to default to `House Alarm`. It now defaults to the name configured on the UNO (if REST is enabled), and falls back to `House Alarm`. A name you already saved is kept.
 - Version 1.2.0 stops publishing `lastHeartbeat`, `lastRawMessage` and `panelTime` by default. Turn on **Publish diagnostic events** if a rule uses them.

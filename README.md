@@ -87,9 +87,11 @@ The partitions and zones are children of the `UNO Connection` device, so Hubitat
 
 Device network IDs are fixed (`uno-zone-N`, `uno-partition-N`), so they stay the same from one release to the next. The one exception was 1.4.0, which moved the partitions and zones under the connection device and so made them new devices (see [INSTALL.md](INSTALL.md)). Only one UNO per hub is supported.
 
-Zone names from the UNO's REST interface are the ones stored on the panel, which keeps only 16 characters of each. Type your own under **Zone names and types** for longer ones. A zone you rename on the Devices page keeps that name when you save the app; the UNO's name only replaces a label that is still the default or the one the app set. A name typed in the app always applies.
+Zone names from the UNO's REST interface are the ones stored on the panel, which keeps only 16 characters of each. Type your own under **5. Zone names and types** for longer ones. A zone you rename on the Devices page keeps that name when you save the app; the UNO's name only replaces a label that is still the default or the one the app set. A name typed in the app always applies.
 
 ## App settings
+
+The app's page is split into numbered sections, each with a coloured title bar and a one-line note on what it is for: **1** connect to the UNO, **2** names and startup state from the UNO, **3** partitions, **4** zones to track, **5** zone names and types, **6** zone hints, **7** name prefix, **8** users, **9** PGM outputs, **10** status device and stale sensors, **11** notifications, **12** safety, **13** connection tuning and logging. A **Status** section at the top shows the connection. Sections marked *optional* can be left alone.
 
 | Setting | Purpose |
 |---|---|
@@ -104,7 +106,7 @@ Zone names from the UNO's REST interface are the ones stored on the panel, which
 | Zone set | e.g. `1-8,12,20-27`. When filled in it **replaces** Zone Count |
 | Keep a bypassed zone in the open list | Off by default. See [Open zones](#open-zones) |
 | Default type for unknown zones | Used when a zone has no hint and its label doesn't suggest a type |
-| Zone names and types | Under **Zone names and types** (collapsed), one name and one type for each zone in the zone set. Each name box is pre-filled with the UNO's own name for the zone, which you can edit. Press **Load zone names from the UNO** to fetch the names now, so you can see and change them before pressing Done. A name or type chosen here wins over Zone Hints |
+| Zone names and types | Section **5. Zone names and types** (collapsed; tap its title to open it), one name and one type for each zone in the zone set. Each name box is pre-filled with the UNO's own name for the zone, which you can edit. Press **Load zone names from the UNO** to fetch the names now, so you can see and change them before pressing Done. A name or type chosen here wins over Zone Hints |
 | Zone Hints | One zone per line: `zoneNumber:Label:type` (`contact`, `motion`, `smoke`, `co`, `water`) |
 | User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
 | Device name prefix | Optional text put in front of every partition and zone label (`Alarm` gives `Alarm Front Door`), so they sort together on the Devices page. The connection, PGM and status devices keep their plain names. A prefix longer than 50 characters is cut, and a whole label is cut at 255. A zone you renamed by hand keeps its own name, with the prefix in front. Names in events and notifications don't include the prefix |
