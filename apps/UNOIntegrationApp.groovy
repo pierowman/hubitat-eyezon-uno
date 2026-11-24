@@ -61,7 +61,7 @@ def mainPage() {
         section("Device names (optional)") {
             input "devicePrefix", "text",
                 title: "Device name prefix",
-                description: "Put in front of the name of every device this app creates, so they sort together on the Devices page, for example 'Alarm' gives 'Alarm Front Door'. Leave empty for none. Longer than ${maxPrefix()} characters is cut, and a whole name is cut at ${maxLabel()}.",
+                description: "Put in front of the name of every partition and zone, so they sort together on the Devices page, for example 'Alarm' gives 'Alarm Front Door'. Leave empty for none. Longer than ${maxPrefix()} characters is cut, and a whole name is cut at ${maxLabel()}.",
                 submitOnChange: true,
                 required: false
             paragraph "Example: ${prefixedLabel('Front Door')}. The UNO itself keeps only 16 characters of each zone name, so use the zone names below for longer ones."
@@ -101,15 +101,14 @@ def mainPage() {
         }
 
         section("Zone names and types (optional)", hideable: true, hidden: true) {
-            paragraph "The names the UNO has stored for your zones are shown under each zone. Leave a name blank to use that one, or type your own (the UNO keeps only 16 characters of each name). A name or type chosen here wins over Zone Hints. Press Done to apply."
+            paragraph "The names the UNO has stored for your zones are filled in as suggestions. Edit any of them to rename the zone (the UNO keeps only 16 characters of each name, so a longer one has to be typed here). A name or type chosen here wins over Zone Hints. Press Done to apply."
             input "loadZoneNames", "button", title: "Load zone names from the UNO"
             paragraph zoneNamesStatus()
             configuredZones().each { Integer z ->
                 String panelName = state.restZoneLabels ? state.restZoneLabels["${z}"] : null
-                input "zoneName_${z}", "text",
-                    title: "Zone ${z} name",
-                    description: panelName ? "UNO name: ${panelName}" : "No name stored on the UNO",
-                    required: false
+                Map nameInput = [title: "Zone ${z} name", required: false]
+                if (panelName) nameInput.defaultValue = panelName else nameInput.description = "No name stored on the UNO"
+                input "zoneName_${z}", "text", nameInput
                 input "zoneType_${z}", "enum",
                     title: "Zone ${z} type",
                     options: ["auto": "Automatic (from the name)", "contact": "Contact", "motion": "Motion", "smoke": "Smoke", "co": "CO", "water": "Water"],
@@ -247,6 +246,8 @@ def initialize() {
     state.restZoneLabels = state.restZoneLabels ?: [:]
     state.restPartitionLabels = state.restPartitionLabels ?: [:]
     state.restSystemName = state.restSystemName ?: null
+    // The connection device keeps the names it applied now.
+    state.remove("appliedLabels")
 
     ensureConnectionDevice()
 
@@ -260,17 +261,10 @@ def initialize() {
         state.restStatus = "disabled"
     }
 
-    ensurePartitionDevices()
+    removeOldChildren()
     ensurePgmDevices()
     ensureStatusDevice()
 
-    if (settings.autoCreateConfiguredZones != false) {
-        configuredZones().each { Integer zoneNum ->
-            upsertDiscoveredZone(zoneNum, null, null)
-        }
-    }
-
-    reconcileExistingZones()
     List<String> changed = applyConnectionSettings()
     scheduleStaleCheck()
 
@@ -284,12 +278,14 @@ def initialize() {
         // New devices (and new zone assignments, or a changed open-list rule) start knowing nothing, so have the panel announce everything again.
         runIn(1, "resyncConnection")
     }
+    // The connection device owns the partitions and zones; it creates and names them from what was just saved.
+    runIn(2, "syncConnectionDevices")
     state.appliedPrefix = devicePrefix()
     state.deviceChurn = 0
 }
 
 private String appVersion() {
-    return "1.3.1"
+    return "1.4.0"
 }
 
 // The settings a running connection cannot pick up on its own.
@@ -323,7 +319,7 @@ private void ensureConnectionDevice() {
             dni,
             [
                 name       : "UNO Connection",
-                label      : prefixedLabel("UNO Connection"),
+                label      : "UNO Connection",
                 isComponent: false
             ]
         )
@@ -336,6 +332,8 @@ private void ensureConnectionDevice() {
 }
 
 // ---- Device label prefix ----
+// The prefix is for the partitions and zones only (the connection device names them; the app just says what the
+// prefix is). The app's own devices (connection, PGM, status) keep their plain names.
 
 private Integer maxPrefix() { return 50 }
 
@@ -346,77 +344,93 @@ private String devicePrefix() {
     return (settings.devicePrefix ?: "").toString().trim().take(maxPrefix())
 }
 
-// The label a device gets: the prefix, a space, then its own name.
+// How a partition or zone label comes out, for the example on the settings page.
 private String prefixedLabel(String base) {
     String prefix = devicePrefix()
-    String label = prefix ? "${prefix} ${base}".toString() : base
-    if (label.length() > maxLabel()) {
-        log.warn "Device name cut to ${maxLabel()} characters: ${label.take(60)}..."
-        return label.take(maxLabel())
-    }
-    return label
+    return prefix ? "${prefix} ${base}".toString() : base
 }
 
-// A label with the prefix removed that this app put on it: the one in force before this save, or the current one
-// (a device made earlier in the same save already carries it). Putting the prefix back gives the same label.
+// A label with the prefix removed that an earlier version of this app put on it.
 private String unprefixedLabel(String label) {
-    if (!label) return label
-    for (String prefix : [(state.appliedPrefix ?: "").toString(), devicePrefix()]) {
-        if (prefix && label.startsWith(prefix + " ")) return label.substring(prefix.length() + 1)
-    }
+    String applied = (state.appliedPrefix ?: "").toString()
+    if (label && applied && label.startsWith(applied + " ")) return label.substring(applied.length() + 1)
     return label
 }
 
-// A device that still has its default name follows the prefix; one that has been renamed by hand is left alone.
+// An earlier version put the prefix on every device. A device that still has its default name loses it; one that has
+// been renamed by hand is left alone.
 private void relabelDefault(def dev, String base) {
     if (unprefixedLabel(dev.label ?: base) != base) return
 
-    String label = prefixedLabel(base)
     try {
-        if (dev.label != label) dev.setLabel(label)
+        if (dev.label != base) dev.setLabel(base)
     } catch (e) {
         log.warn "Unable to relabel ${base}: ${e}"
     }
 }
 
-private void ensurePartitionDevices() {
-    configuredPartitions().each { Integer partition ->
-        ensurePartitionDevice(partition)
+// The connection device creates the partitions and zones as its own children, so the Devices page lists them under
+// it. Before version 1.4.0 they were children of this app, and device ids can't be shared, so those are removed first
+// (the connection device makes new ones).
+private void removeOldChildren() {
+    getChildDevices()?.each { dev ->
+        String dni = dev.deviceNetworkId ?: ""
+        if (!(dni.startsWith("uno-zone-") || dni.startsWith("uno-partition-"))) return
+
+        // A zone keeps the name its old device had, so a name changed by hand isn't lost in the move.
+        rememberLegacyLabel(dni, dev.label)
+        try {
+            deleteChildDevice(dni)
+            logInfo("Removed ${dni}; it is recreated under the UNO Connection device")
+        } catch (e) {
+            log.warn "Could not remove the old ${dni} (it may be in use by a rule or dashboard). Stop using it there and press Done again; until it is gone the new device can't be made: ${e}"
+        }
     }
 }
 
-private void ensurePartitionDevice(Integer partition) {
-    String dni = "uno-partition-${partition}"
-    String base = partitionLabelFor(partition)
-    String label = prefixedLabel(base)
+private void rememberLegacyLabel(String dni, def label) {
+    if (!dni.startsWith("uno-zone-") || !label) return
 
-    def dev = getChildDevice(dni)
+    Map legacy = (state.legacyLabels instanceof Map) ? new LinkedHashMap(state.legacyLabels) : [:]
+    legacy[dni.substring("uno-zone-".length())] = unprefixedLabel(label.toString())
+    state.legacyLabels = legacy
+}
 
-    if (!dev) {
-        def created = addChildDevice(
-            "uno",
-            "UNO Partition",
-            dni,
-            [
-                name       : base,
-                label      : label,
-                isComponent: true
-            ]
-        )
-        applyHealth(created)
-        applyPanelSummary(created)
-        noteDeviceCreated()
-        logInfo("Created partition device: ${label}")
-    } else {
-        try {
-            if (dev.label != label) {
-                dev.setLabel(label)
-                logInfo("Updated partition ${partition} label to ${label}")
-            }
-        } catch (e) {
-            log.warn "Unable to update partition label: ${e}"
-        }
-    }
+// Asks the connection device to create or update its partitions and zones from what was just saved.
+def syncConnectionDevices() {
+    getChildDevice("uno-connection")?.syncDevices()
+}
+
+// What the connection device should create: the prefix, the partitions with their names, whether to pre-create the
+// zones, and the type for a zone nothing says anything about.
+def devicePlan() {
+    Map partitions = [:]
+    configuredPartitions().each { Integer p -> partitions[p] = partitionLabelFor(p) }
+    return [
+        prefix         : devicePrefix(),
+        partitions     : partitions,
+        autoCreate     : settings.autoCreateConfiguredZones != false,
+        defaultZoneType: (settings.defaultUnknownZoneType ?: "contact").toString()
+    ]
+}
+
+// What the app knows about one zone: the name and type chosen for it (on the page, or in Zone Hints) and the name the
+// UNO has stored for it. The connection device decides what to do with them.
+def zoneSpec(Integer zoneNum) {
+    Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
+    Map hint = hints["${zoneNum}"] ?: [:]
+    String panel = state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
+    String ownName = settings["zoneName_${zoneNum}"]?.toString()?.trim()
+    String ownType = settings["zoneType_${zoneNum}"]?.toString()?.trim()
+    // The name boxes are pre-filled with the UNO's name, and Hubitat may save a pre-filled value as if it were typed.
+    // A name that is just the UNO's own is not a choice: it must not hide the hint or a later change on the UNO.
+    if (ownName && ownName == panel) ownName = null
+    return [
+        label : ownName ?: hint.label?.trim() ?: null,
+        type  : (ownType && ownType != "auto") ? ownType : (hint.type?.trim() ?: null),
+        panel : panel,
+        legacy: state.legacyLabels instanceof Map ? state.legacyLabels["${zoneNum}"] : null
+    ]
 }
 
 // PGM outputs are optional buttons; one device per output in the set.
@@ -425,7 +439,7 @@ private void ensurePgmDevices() {
     parseRange(settings.pgmSet, 1, 14).values.each { Integer pgm ->
         String dni = "uno-pgm-${pgm}"
         String base = names["${pgm}"]?.toString()?.trim() ?: "PGM ${pgm}"
-        String label = prefixedLabel(base)
+        String label = base
         def dev = getChildDevice(dni)
 
         if (!dev) {
@@ -644,7 +658,7 @@ private void ensureStatusDevice() {
         return
     }
     try {
-        def created = addChildDevice("uno", "UNO Status", "uno-status", [name: "UNO Status", label: prefixedLabel("UNO Status"), isComponent: true])
+        def created = addChildDevice("uno", "UNO Status", "uno-status", [name: "UNO Status", label: "UNO Status", isComponent: true])
         applyHealth(created)
         applyPanelSummary(created)
         noteDeviceCreated()
@@ -654,26 +668,18 @@ private void ensureStatusDevice() {
     }
 }
 
-// The connection device reports which zones are open or bypassed and the troubles. The status device shows
-// all of it; with a single partition that partition's device shows the zones too (the UNO doesn't say which
-// partition a zone belongs to, so with several they stay on the status device).
+// The connection device reports which zones are open or bypassed and the troubles; the status device shows all of it.
+// (It gives its partition the lists itself, since the partitions are its own children.)
 def notifyPanelSummary(Map summary) {
     getChildDevice("uno-status")?.with { dev -> summary.each { String n, def v -> dev.sendEvent(name: n, value: v) } }
-    if (configuredPartitions().size() == 1 && !hasPartitionZones()) {
-        def dev = getChildDevice("uno-partition-${configuredPartitions()[0]}")
-        summary.findAll { String n, def v -> n in ["openZones", "bypassedZones"] }.each { String n, def v -> dev?.sendEvent(name: n, value: v) }
-    }
 }
 
-// Brings a newly created device up to date from what the connection device already knows. With zones assigned
-// to partitions the connection device sends each partition its own lists, so there is nothing to copy.
+// Brings a newly created status device up to date from what the connection device already knows.
 private void applyPanelSummary(def dev) {
     def conn = getChildDevice("uno-connection")
     if (!dev || !conn) return
-    boolean isStatus = dev.deviceNetworkId == "uno-status"
-    if (!isStatus && (configuredPartitions().size() != 1 || hasPartitionZones())) return
 
-    (isStatus ? ["openZones", "openZoneCount", "openZonesTimed", "openZonesDetail", "bypassedZones", "troubleSummary"] : ["openZones", "bypassedZones"]).each { String n ->
+    ["openZones", "openZoneCount", "openZonesTimed", "openZonesDetail", "bypassedZones", "troubleSummary"].each { String n ->
         def v = conn.currentValue(n)
         if (v != null) dev.sendEvent(name: n, value: v)
     }
@@ -686,40 +692,22 @@ private void scheduleStaleCheck() {
     schedule("0 0 9 * * ?", "staleSensorCheck")
 }
 
-// Zones with no recorded activity in the chosen number of days. A zone that has never triggered counts only
-// once the check itself has been running that long, since there is no way to know how old its sensor is.
+// Zones with no recorded activity in the chosen number of days. The connection device owns the zones, so it does the
+// looking and answers through staleSensorResult.
 def staleSensorCheck() {
     Integer days = safeInt(settings.staleSensorDays, 0)
     if (days <= 0) return
 
-    long cutoff = now() - days * 86400000L
-    List<String> stale = []
-    getChildDevices()?.each { dev ->
-        Integer zone = safeParseZoneFromDni(dev.deviceNetworkId ?: "")
-        if (!zone) return
+    getChildDevice("uno-connection")?.checkStaleSensors(days, (state.staleSince ?: now()) as Long)
+}
 
-        Long last = parseFaultTime(dev.currentValue("lastFault"))
-        boolean isStale = (last != null) ? last < cutoff : ((state.staleSince ?: now()) as Long) < cutoff
-        if (isStale) stale << (zoneName(zone) ?: "Zone ${zone}").toString()
-    }
-
-    String summary = stale ? stale.sort().join(", ") : "none"
+def staleSensorResult(Integer days, List names) {
+    String summary = names ? names.join(", ") : "none"
     getChildDevice("uno-status")?.sendEvent(name: "staleSensors", value: summary)
-    if (stale && state.staleSummary != summary && settings.notifyTroubles != false) {
+    if (names && state.staleSummary != summary && settings.notifyTroubles != false) {
         sendNotice("No activity for ${days} days: ${summary}".toString())
     }
     state.staleSummary = summary
-}
-
-private Long parseFaultTime(def text) {
-    if (!text) return null
-    try {
-        def fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
-        fmt.setTimeZone(location.timeZone)
-        return fmt.parse(text.toString()).time
-    } catch (ignored) {
-        return null
-    }
 }
 
 def armStay(def partition = 1, String code = null) {
@@ -774,185 +762,10 @@ def panic(String type, def partition = 1) {
     getChildDevice("uno-connection")?.panic(type, partition)
 }
 
-// Partitions without a device (not in the partition set) are ignored.
-def notifyPartitionState(Integer partition, String status) {
-    getChildDevice("uno-partition-${partition}")?.setAlarmState(status)
-}
-
-// Forwards attribute events (trouble flags, chime) from the connection device to a partition device.
-def notifyPartitionEvents(Integer partition, List events) {
-    def dev = getChildDevice("uno-partition-${partition}")
-    if (!dev) return
-    events?.each { Map e -> dev.sendEvent(e) }
-}
-
 // Lookups the connection driver uses to put names into event descriptions.
 def userName(Integer user) {
     Map names = (state.userNamesMap instanceof Map) ? state.userNamesMap : [:]
     return names["${user}"]
-}
-
-def zoneName(Integer zone) {
-    // The prefix is for the Devices page; names in events and notifications are the zone's own.
-    String label = unprefixedLabel(getChildDevice("uno-zone-${zone}")?.label)
-    // A zone that still has its default label has no real name to show.
-    return (label && label != "Zone ${zone}") ? label : null
-}
-
-def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String suggestedName = null) {
-    if (zoneNum == null || zoneNum <= 0) return
-
-    Map known = knownZoneNames(zoneNum)
-    String hintedLabel = known.hintedLabel
-    String hintedType  = known.hintedType
-
-    String inferredName = suggestedName?.trim()
-    String inferredType = suggestedType?.trim()
-    String nameForInference = hintedLabel ?: known.restLabel ?: inferredName
-
-    String dni = "uno-zone-${zoneNum}"
-    def existing = getChildDevice(dni)
-
-    String finalLabel = prefixedLabel(zoneBaseLabel(zoneNum, hintedLabel, known.restLabel ?: inferredName, existing))
-
-    if (!existing) {
-        String newDriver = driverForNewZone(hintedType, inferredType, nameForInference)
-        addZoneDevice(zoneNum, newDriver, finalLabel)
-        logDebug("Created zone ${zoneNum}: ${finalLabel} (${newDriver})")
-        return
-    }
-
-    String existingTypeName = deviceTypeName(existing)
-    String desiredDriver = desiredDriverForExisting(existingTypeName, hintedType, inferredType, nameForInference)
-
-    if (existingTypeName && existingTypeName != desiredDriver) {
-        recreateZone(zoneNum, desiredDriver, finalLabel)
-        return
-    }
-
-    relabelZone(existing, zoneNum, finalLabel)
-}
-
-// What the user (the Zone names below the settings, or Zone Hints) and the panel's web interface (REST labels) say
-// about a zone. A name or type chosen for one zone on the page wins over its line in Zone Hints.
-private Map knownZoneNames(Integer zoneNum) {
-    Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
-    Map hint = hints["${zoneNum}"] ?: [:]
-    String ownName = settings["zoneName_${zoneNum}"]?.toString()?.trim()
-    String ownType = settings["zoneType_${zoneNum}"]?.toString()?.trim()
-    return [
-        hintedLabel: ownName ?: hint.label?.trim() ?: null,
-        hintedType : (ownType && ownType != "auto") ? ownType : (hint.type?.trim() ?: null),
-        restLabel  : state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
-    ]
-}
-
-// The name for a zone, without the prefix. A name you chose always applies. The UNO's name replaces the label only
-// while that is still the default or what this app set last time, so a name changed on the Devices page is kept.
-private String zoneBaseLabel(Integer zoneNum, String chosen, String fromPanel, def existing) {
-    String key = "${zoneNum}".toString()
-    Map applied = (state.appliedLabels instanceof Map) ? state.appliedLabels : [:]
-    String current = unprefixedLabel(existing?.label)
-    boolean untouched = !current || current == "Zone ${zoneNum}" || current == applied[key]
-
-    String base = chosen ?: ((fromPanel && untouched) ? fromPanel : (current ?: "Zone ${zoneNum}"))
-
-    // Only a name this app set is remembered; a hand-made one must never look like ours.
-    if ((base == chosen || base == fromPanel) && applied[key] != base) {
-        Map updated = new LinkedHashMap(applied)
-        updated[key] = base
-        state.appliedLabels = updated
-    }
-    return base
-}
-
-// The driver for a zone seen for the first time: a hint wins, then what the event or name suggests, then the default.
-private String driverForNewZone(String hintedType, String inferredType, String nameForInference) {
-    return driverNameForType(canonicalType(
-        hintedType ?:
-        inferredType ?:
-        inferTypeFromName(nameForInference) ?:
-        settings.defaultUnknownZoneType ?:
-        "contact"
-    ))
-}
-
-private void recreateZone(Integer zoneNum, String driver, String label) {
-    try {
-        deleteChildDevice("uno-zone-${zoneNum}")
-    } catch (e) {
-        log.warn "Could not recreate zone ${zoneNum}; device is in use: ${e}"
-        return
-    }
-
-    addZoneDevice(zoneNum, driver, label)
-    logInfo("Recreated zone ${zoneNum}: ${label} (${driver})")
-}
-
-private void addZoneDevice(Integer zoneNum, String driver, String label) {
-    def created = addChildDevice(
-        "uno",
-        driver,
-        "uno-zone-${zoneNum}",
-        [
-            name       : "UNO Zone ${zoneNum}",
-            label      : label,
-            isComponent: true
-        ]
-    )
-    applyHealth(created)
-    noteDeviceCreated()
-}
-
-private void relabelZone(def zoneDevice, Integer zoneNum, String label) {
-    try {
-        if (zoneDevice.label != label) {
-            zoneDevice.setLabel(label)
-            logDebug("Updated zone ${zoneNum} label to ${label}")
-        }
-    } catch (e) {
-        log.warn "Unable to relabel zone ${zoneNum}: ${e}"
-    }
-}
-
-private void reconcileExistingZones() {
-    // Reuse the upsert rules so reconcile and discovery can never disagree about a zone's type.
-    List<Integer> zoneNums = []
-    getChildDevices()?.each { dev ->
-        String dni = dev.deviceNetworkId ?: ""
-        if (!dni.startsWith("uno-zone-")) return
-
-        Integer zoneNum = safeParseZoneFromDni(dni)
-        if (zoneNum) zoneNums << zoneNum
-    }
-
-    zoneNums.each { Integer zoneNum ->
-        upsertDiscoveredZone(zoneNum, null, null)
-    }
-}
-
-private String deviceTypeName(dev) {
-    try {
-        return dev.getTypeName()
-    } catch (ignored) {
-        try {
-            return dev.typeName
-        } catch (ignored2) {
-            return null
-        }
-    }
-}
-
-// An explicit hint always wins. Otherwise a device still on the default driver may be upgraded from a
-// CID suggestion or its label; a device already on a specific driver is left alone to avoid flip-flopping.
-private String desiredDriverForExisting(String currentDriver, String hintedType, String suggestedType, String nameForInference) {
-    if (hintedType) return driverNameForType(canonicalType(hintedType))
-
-    String defaultDriver = driverNameForType(canonicalType(settings.defaultUnknownZoneType ?: "contact"))
-    if (currentDriver && currentDriver != defaultDriver) return currentDriver
-
-    String learned = suggestedType ?: inferTypeFromName(nameForInference)
-    return learned ? driverNameForType(canonicalType(learned)) : currentDriver
 }
 
 // The "Load zone names from the UNO" button: fetches the names now, so they can be seen and changed before pressing Done.
@@ -1057,63 +870,6 @@ private Map restGetJson(String path) {
     }
 
     return result
-}
-
-private Integer safeParseZoneFromDni(String dni) {
-    try {
-        return dni.replace("uno-zone-", "") as Integer
-    } catch (ignored) {
-        return null
-    }
-}
-
-private String driverNameForType(String zoneType) {
-    switch ((zoneType ?: "contact").toLowerCase()) {
-        case "motion":
-            return "UNO Zone Motion"
-        case "smoke":
-            return "UNO Zone Smoke"
-        case "co":
-            return "UNO Zone CO"
-        case "water":
-            return "UNO Zone Water"
-        default:
-            return "UNO Zone Contact"
-    }
-}
-
-private String canonicalType(String raw) {
-    String t = (raw ?: "contact").toLowerCase().trim()
-
-    switch (t) {
-        case "pir":
-        case "interior":
-            return "motion"
-        case "fire":
-        case "heat":
-            return "smoke"
-        case "carbonmonoxide":
-        case "carbon_monoxide":
-            return "co"
-        case "leak":
-        case "flood":
-            return "water"
-        default:
-            return t
-    }
-}
-
-private String inferTypeFromName(String name) {
-    String n = (name ?: "").toLowerCase()
-
-    // Match at word starts so "Courtyard" isn't CO and "Wheat" isn't heat.
-    if (n =~ /\b(pir|motion)/) return "motion"
-    if (n =~ /\b(smoke|heat)/) return "smoke"
-    if (n.contains("carbon monoxide") || n =~ /\bco\b/) return "co"
-    if (n =~ /\b(water|leak|flood|hvac)/) return "water"
-    if (n =~ /\b(door|window|gate|patio)/) return "contact"
-
-    return null
 }
 
 private Map parseZoneHints(String raw) {
@@ -1259,10 +1015,6 @@ private Map parsePartitionZones(def spec) {
     return [assignments: assignments, problems: problems, unassigned: zones.findAll { !owner.containsKey(it) }]
 }
 
-private boolean hasPartitionZones() {
-    return !parsePartitionZones(settings.partitionZones).assignments.isEmpty()
-}
-
 // The validated assignments in the compact form the connection device reads, e.g. "1:1,2,3;2:9,10".
 private String normalizedPartitionZones() {
     Map<Integer, List<Integer>> assignments = parsePartitionZones(settings.partitionZones).assignments
@@ -1330,10 +1082,4 @@ private Integer safeInt(def val, Integer fallback) {
 
 private void logInfo(String msg) {
     log.info msg
-}
-
-private void logDebug(String msg) {
-    if (settings.debugLogging) {
-        log.debug msg
-    }
 }

@@ -1,75 +1,81 @@
-// App: device creation, discovery, hints, partitions, zone sets, forwarding and setup checks.
+// App and connection driver together: the app decides what the devices are, the connection device creates the
+// partitions and zones as its own children. (Run with newPair; `conn.save()` is what the hub does after Done.)
 
 k.section("Zone discovery and hints") {
-    def (a, env) = k.newApp([zoneHints: "2:Dining Room PIR:motion\n3:Front Door:contact\n4:Kitchen Smoke:smoke\n# comment\nbad line"])
-    a.initialize()
-    k.check("connection + partition + 5 zones created", env.children.size() == 7, env.children.keySet())
-    k.check("zone 1 default contact", env.children["uno-zone-1"].typeName == "UNO Zone Contact")
-    k.check("zone 2 motion with label", env.children["uno-zone-2"].typeName == "UNO Zone Motion" && env.children["uno-zone-2"].label == "Dining Room PIR")
-    k.check("zone 4 smoke", env.children["uno-zone-4"].typeName == "UNO Zone Smoke")
-    k.check("partition 1 gets the default name", env.children["uno-partition-1"].label == "House Alarm")
+    def (a, conn, env) = k.newPair([zoneHints: "2:Dining Room PIR:motion\n3:Front Door:contact\n4:Kitchen Smoke:smoke\n# comment\nbad line"])
+    conn.save()
+    Map kids = conn.host.children
+    k.check("the connection device makes the partition and 5 zones", kids.size() == 6, kids.keySet())
+    k.check("and the app makes none of them", env.children.keySet() == ["uno-connection"] as Set, env.children.keySet())
+    k.check("zone 1 default contact", kids["uno-zone-1"].typeName == "UNO Zone Contact")
+    k.check("zone 2 motion with label", kids["uno-zone-2"].typeName == "UNO Zone Motion" && kids["uno-zone-2"].label == "Dining Room PIR")
+    k.check("zone 4 smoke", kids["uno-zone-4"].typeName == "UNO Zone Smoke")
+    k.check("partition 1 gets the default name", kids["uno-partition-1"].label == "House Alarm")
     k.check("connection settings pushed", env.children["uno-connection"].settingsUpdated.any { it[0] == "ip" })
-    env.deleted.clear()
-    a.initialize()
-    k.check("re-initialize doesn't delete/recreate zones", env.deleted.isEmpty(), env.deleted)
+    conn.host.deleted.clear()
+    conn.save()
+    k.check("re-initialize doesn't delete/recreate zones", conn.host.deleted.isEmpty(), conn.host.deleted)
 }
 
 k.section("REST labels and reconcile don't flip-flop") {
-    def (a, env) = k.newApp([useRestMetadata: true, zoneCount: 3],
+    def (a, conn, env) = k.newPair([useRestMetadata: true, zoneCount: 3],
         ["zone labels": ["Kitchen CO", "Hall PIR", "Front Door"], "partition labels": ["Main"], "system name": "My UNO"])
-    a.initialize()
-    k.check("'Kitchen CO' => CO driver", env.children["uno-zone-1"].typeName == "UNO Zone CO", env.children["uno-zone-1"].typeName)
-    k.check("'Hall PIR' => motion", env.children["uno-zone-2"].typeName == "UNO Zone Motion")
-    env.deleted.clear(); env.created.clear()
-    a.updated()
-    k.check("save/update doesn't recreate inferred zones", env.deleted.isEmpty() && env.created.isEmpty(), [env.deleted, env.created])
+    conn.save()
+    Map kids = conn.host.children
+    k.check("'Kitchen CO' => CO driver", kids["uno-zone-1"].typeName == "UNO Zone CO", kids["uno-zone-1"].typeName)
+    k.check("'Hall PIR' => motion", kids["uno-zone-2"].typeName == "UNO Zone Motion")
+    conn.host.deleted.clear(); conn.host.created.clear()
+    conn.save()
+    k.check("save/update doesn't recreate inferred zones", conn.host.deleted.isEmpty() && conn.host.created.isEmpty(), [conn.host.deleted, conn.host.created])
 }
 
 k.section("CID suggestions are stable") {
-    def (a, env) = k.newApp([zoneCount: 8, zoneHints: "7:Garage:contact"])
-    a.initialize(); env.deleted.clear()
-    a.upsertDiscoveredZone(6, "smoke", null)
-    k.check("a default-type zone is upgraded once", env.children["uno-zone-6"].typeName == "UNO Zone Smoke" && env.deleted == ["uno-zone-6"], env.deleted)
-    a.upsertDiscoveredZone(6, null, null); a.upsertDiscoveredZone(6, null, null)
-    k.check("later upserts don't flip it back", env.children["uno-zone-6"].typeName == "UNO Zone Smoke" && env.deleted.size() == 1, env.deleted)
-    a.upsertDiscoveredZone(6, "water", null)
-    k.check("an already-specific zone isn't re-typed", env.children["uno-zone-6"].typeName == "UNO Zone Smoke")
-    a.upsertDiscoveredZone(7, "smoke", null)
-    k.check("an explicit hint beats a CID suggestion", env.children["uno-zone-7"].typeName == "UNO Zone Contact")
-    a.upsertDiscoveredZone(0, null, null); a.upsertDiscoveredZone(null, null, null)
-    k.check("zone 0 / null ignored", env.children.keySet().every { !it.endsWith("zone-0") && !it.endsWith("zone-null") })
+    def (a, conn, env) = k.newPair([zoneCount: 8, zoneHints: "7:Garage:contact"])
+    conn.save(); conn.host.deleted.clear()
+    Map kids = conn.host.children
+    conn.ensureZoneFor(6, "smoke")
+    k.check("a default-type zone is upgraded once", kids["uno-zone-6"].typeName == "UNO Zone Smoke" && conn.host.deleted == ["uno-zone-6"], conn.host.deleted)
+    conn.ensureZoneFor(6, null); conn.ensureZoneFor(6, null)
+    k.check("later events don't flip it back", kids["uno-zone-6"].typeName == "UNO Zone Smoke" && conn.host.deleted.size() == 1, conn.host.deleted)
+    conn.ensureZoneFor(6, "water")
+    k.check("an already-specific zone isn't re-typed", kids["uno-zone-6"].typeName == "UNO Zone Smoke")
+    conn.ensureZoneFor(7, "smoke")
+    k.check("an explicit hint beats a CID suggestion", kids["uno-zone-7"].typeName == "UNO Zone Contact")
+    conn.ensureZoneFor(0, null); conn.ensureZoneFor(null, null)
+    k.check("zone 0 / null ignored", kids.keySet().every { !it.endsWith("zone-0") && !it.endsWith("zone-null") })
 }
 
 k.section("Hint changes still apply") {
-    def (a, env) = k.newApp([zoneCount: 3])
-    a.initialize()
+    def (a, conn, env) = k.newPair([zoneCount: 3])
+    conn.save()
+    Map kids = conn.host.children
     a.settings.zoneHints = "1:Basement Leak:water"
-    a.updated()
-    k.check("a new hint recreates the zone with the new driver", env.children["uno-zone-1"].typeName == "UNO Zone Water" && env.children["uno-zone-1"].label == "Basement Leak")
+    conn.save()
+    k.check("a new hint recreates the zone with the new driver", kids["uno-zone-1"].typeName == "UNO Zone Water" && kids["uno-zone-1"].label == "Basement Leak")
     a.settings.zoneHints = "1:Basement Sensor:contact"
-    a.updated()
-    k.check("changing the hint back recreates it again", env.children["uno-zone-1"].typeName == "UNO Zone Contact")
+    conn.save()
+    k.check("changing the hint back recreates it again", kids["uno-zone-1"].typeName == "UNO Zone Contact")
     a.settings.defaultUnknownZoneType = "motion"
     a.settings.zoneHints = ""
-    env.deleted.clear()
-    a.updated()
-    k.check("a hint-less zone on a specific driver is left alone", env.deleted.isEmpty(), env.deleted)
+    conn.host.deleted.clear()
+    conn.save()
+    k.check("a hint-less zone on a specific driver is left alone", conn.host.deleted.isEmpty(), conn.host.deleted)
 }
 
 k.section("Zone set") {
-    def (a, env) = k.newApp([zoneSet: "1-3,5", zoneCount: 27])
-    a.initialize()
-    List zones = env.children.keySet().findAll { it.startsWith("uno-zone-") }.sort()
+    def (a, conn, env) = k.newPair([zoneSet: "1-3,5", zoneCount: 27])
+    conn.save()
+    List zones = conn.host.children.keySet().findAll { it.startsWith("uno-zone-") }.sort()
     k.check("only the zones in the set are created", zones == ["uno-zone-1", "uno-zone-2", "uno-zone-3", "uno-zone-5"], zones)
     k.check("the set is pushed to the connection device", env.children["uno-connection"].settingsUpdated.any { it[0] == "zoneSet" && it[1].value == "1-3,5" })
 
-    def (b, envB) = k.newApp([zoneSet: "", zoneCount: 4])
-    b.initialize()
-    k.check("an empty set falls back to the zone count", envB.children.keySet().findAll { it.startsWith("uno-zone-") }.size() == 4)
+    def (b, connB, envB) = k.newPair([zoneSet: "", zoneCount: 4])
+    connB.save()
+    k.check("an empty set falls back to the zone count", connB.host.children.keySet().findAll { it.startsWith("uno-zone-") }.size() == 4)
 
-    def (c, envC) = k.newApp([zoneSet: "garbage", zoneCount: 2])
-    c.initialize()
-    k.check("an invalid set falls back to the zone count", envC.children.keySet().findAll { it.startsWith("uno-zone-") }.size() == 2)
+    def (c, connC, envC) = k.newPair([zoneSet: "garbage", zoneCount: 2])
+    connC.save()
+    k.check("an invalid set falls back to the zone count", connC.host.children.keySet().findAll { it.startsWith("uno-zone-") }.size() == 2)
 
     k.check("preview lists the zones", a.rangePreview("1-3,5", 1, 128, "zone", "x").contains("zones: 1, 2, 3, 5 (4)"), a.rangePreview("1-3,5", 1, 128, "zone", "x"))
     k.check("preview reports ignored entries", a.rangePreview("1-3,x,500", 1, 128, "zone", "x").contains("Ignored") && a.rangePreview("1-3,x,500", 1, 128, "zone", "x").contains("x, 500"))
@@ -77,46 +83,49 @@ k.section("Zone set") {
 }
 
 k.section("Multiple partitions") {
-    def (a, env) = k.newApp([partitionSet: "1-2,4", zoneCount: 1, partitionHints: "2:Guest House\n# note\nbad\n4:Shop"])
-    a.initialize()
-    List parts = env.children.keySet().findAll { it.startsWith("uno-partition-") }.sort()
+    def (a, conn, env) = k.newPair([partitionSet: "1-2,4", zoneCount: 1, partitionHints: "2:Guest House\n# note\nbad\n4:Shop"])
+    conn.save()
+    Map kids = conn.host.children
+    List parts = kids.keySet().findAll { it.startsWith("uno-partition-") }.sort()
     k.check("a partition device is created for each partition in the set", parts == ["uno-partition-1", "uno-partition-2", "uno-partition-4"], parts)
-    k.check("partition 1 default name", env.children["uno-partition-1"].label == "House Alarm")
-    k.check("hints name the other partitions", env.children["uno-partition-2"].label == "Guest House" && env.children["uno-partition-4"].label == "Shop")
+    k.check("partition 1 default name", kids["uno-partition-1"].label == "House Alarm")
+    k.check("hints name the other partitions", kids["uno-partition-2"].label == "Guest House" && kids["uno-partition-4"].label == "Shop")
 
-    def (b, envB) = k.newApp([zoneCount: 1])
-    b.initialize()
-    k.check("no partition set => partition 1 only", envB.children.keySet().findAll { it.startsWith("uno-partition-") }.sort() == ["uno-partition-1"])
+    def (b, connB, envB) = k.newPair([zoneCount: 1])
+    connB.save()
+    k.check("no partition set => partition 1 only", connB.host.children.keySet().findAll { it.startsWith("uno-partition-") }.sort() == ["uno-partition-1"])
 
-    def (c, envC) = k.newApp([partitionSet: "9,x", zoneCount: 1])
-    c.initialize()
-    k.check("an invalid partition set falls back to partition 1", envC.children.keySet().findAll { it.startsWith("uno-partition-") }.sort() == ["uno-partition-1"])
+    def (c, connC, envC) = k.newPair([partitionSet: "9,x", zoneCount: 1])
+    connC.save()
+    k.check("an invalid partition set falls back to partition 1", connC.host.children.keySet().findAll { it.startsWith("uno-partition-") }.sort() == ["uno-partition-1"])
 }
 
 k.section("Partition names") {
     Map rest = ["zone labels": [], "partition labels": ["Main", "Annex"]]
-    def (a, env) = k.newApp([useRestMetadata: true, partitionSet: "1-3", zoneCount: 1], rest)
-    a.initialize()
-    k.check("names come from the UNO when nothing else is set", env.children["uno-partition-1"].label == "Main" && env.children["uno-partition-2"].label == "Annex")
-    k.check("a partition the UNO doesn't name gets a generic name", env.children["uno-partition-3"].label == "Partition 3")
+    def (a, conn, env) = k.newPair([useRestMetadata: true, partitionSet: "1-3", zoneCount: 1], rest)
+    conn.save()
+    Map kids = conn.host.children
+    k.check("names come from the UNO when nothing else is set", kids["uno-partition-1"].label == "Main" && kids["uno-partition-2"].label == "Annex")
+    k.check("a partition the UNO doesn't name gets a generic name", kids["uno-partition-3"].label == "Partition 3")
 
-    def (b, envB) = k.newApp([useRestMetadata: true, partitionSet: "1-2", partitionLabel: "Home", partitionHints: "2:Cabin", zoneCount: 1], rest)
-    b.initialize()
-    k.check("the partition 1 name setting beats the UNO name", envB.children["uno-partition-1"].label == "Home")
-    k.check("a partition hint beats the UNO name", envB.children["uno-partition-2"].label == "Cabin")
+    def (b, connB, envB) = k.newPair([useRestMetadata: true, partitionSet: "1-2", partitionLabel: "Home", partitionHints: "2:Cabin", zoneCount: 1], rest)
+    connB.save()
+    k.check("the partition 1 name setting beats the UNO name", connB.host.children["uno-partition-1"].label == "Home")
+    k.check("a partition hint beats the UNO name", connB.host.children["uno-partition-2"].label == "Cabin")
 
-    def (c, envC) = k.newApp([useRestMetadata: true, partitionSet: "1", partitionLabel: "Home", partitionHints: "1:Hint wins", zoneCount: 1], rest)
-    c.initialize()
-    k.check("a hint beats the partition 1 name setting", envC.children["uno-partition-1"].label == "Hint wins")
+    def (c, connC, envC) = k.newPair([useRestMetadata: true, partitionSet: "1", partitionLabel: "Home", partitionHints: "1:Hint wins", zoneCount: 1], rest)
+    connC.save()
+    k.check("a hint beats the partition 1 name setting", connC.host.children["uno-partition-1"].label == "Hint wins")
 
-    env.children["uno-partition-1"].label = "Renamed by hand"
-    a.updated()
-    k.check("labels are reapplied on update from the stored UNO names", env.children["uno-partition-1"].label == "Main")
+    kids["uno-partition-1"].label = "Renamed by hand"
+    conn.save()
+    k.check("labels are reapplied on update from the stored UNO names", kids["uno-partition-1"].label == "Main")
 }
 
 k.section("Forwarding to the connection and partitions") {
-    def (a, env) = k.newApp([zoneCount: 1, partitionSet: "1-2"])
-    a.initialize()
+    def (a, conn, env) = k.newPair([zoneCount: 1, partitionSet: "1-2"])
+    conn.save()
+    env.children["uno-connection"].callArgs.clear()
     a.chimeOn(); a.chimeOff(2); a.armStay(); a.armAway(2); a.refreshAll(); a.disarm(); a.disarm("1234", 2)
     a.bypassZone(7); a.unbypassZone(7); a.bypassOpenZones(2); a.unbypassAllZones(); a.sendKeys("*71", 2); a.panic("fire", 2)
     List calls = env.children["uno-connection"].callArgs
@@ -131,15 +140,16 @@ k.section("Forwarding to the connection and partitions") {
     a.armStay(2, "4321"); a.armAway(1, "4321")
     k.check("an arm code is passed through", env.children["uno-connection"].callArgs.takeRight(2) == [["armStay", [2, "4321"]], ["armAway", [1, "4321"]]], env.children["uno-connection"].callArgs)
 
-    a.notifyPartitionState(2, "armedStay")
-    k.check("partition state goes to the right partition device", env.children["uno-partition-2"].alarmStates == ["armedStay"] && env.children["uno-partition-1"].alarmStates == [])
-    a.notifyPartitionState(5, "armedAway")
-    k.check("a state for a partition without a device is ignored", true)
-    a.notifyPartitionEvents(1, [[name: "acFailure", value: "active"], [name: "troubleState", value: "trouble"]])
-    k.check("attribute events reach the partition device", env.children["uno-partition-1"].last("acFailure") == "active" && env.children["uno-partition-1"].last("troubleState") == "trouble")
-    a.notifyPartitionEvents(5, [[name: "x", value: "y"]])
-    a.notifyPartitionEvents(1, null)
-    k.check("events for a missing partition or a null list are ignored", true)
+    Map kids = conn.host.children
+    conn.sendPartitionState(2, "armedStay")
+    k.check("partition state goes to the right partition device", kids["uno-partition-2"].alarmStates == ["armedStay"] && kids["uno-partition-1"].alarmStates == [])
+    conn.sendPartitionState(5, "armedAway")
+    k.check("a state for a partition without a device is ignored", kids["uno-partition-5"] == null)
+    conn.sendPartitionEvents(1, [[name: "acFailure", value: "active"], [name: "troubleState", value: "trouble"]])
+    k.check("attribute events reach the partition device", kids["uno-partition-1"].last("acFailure") == "active" && kids["uno-partition-1"].last("troubleState") == "trouble")
+    conn.sendPartitionEvents(5, [[name: "x", value: "y"]])
+    conn.sendPartitionEvents(1, null)
+    k.check("events for a missing partition or a null list are ignored", kids["uno-partition-5"] == null)
 }
 
 k.section("Panic setting") {
@@ -173,11 +183,11 @@ k.section("REST status and setup checks") {
     a.initialize()
     k.check("a successful REST load is recorded", a.state.restStatus == "ok")
 
-    def (u, envU) = k.newApp([useRestMetadata: true, zoneCount: 2])
+    def (u, connU, envU) = k.newPair([useRestMetadata: true, zoneCount: 2])
     u.httpGetImpl = { Map p -> throw new MockHttpException(401) }
-    u.initialize()
+    connU.save()
     k.check("HTTP 401 is reported as rejected credentials", u.state.restStatus.contains("401") && u.errors().any { it.contains("rejected the REST credentials") }, u.state.restStatus)
-    k.check("initialization continues after a REST failure", envU.children.containsKey("uno-partition-1"))
+    k.check("initialization continues after a REST failure", connU.host.children.containsKey("uno-partition-1"))
 
     def (n, envN) = k.newApp([useRestMetadata: true, zoneCount: 2])
     n.httpGetImpl = { Map p -> throw new IOException("timeout") }
@@ -226,26 +236,29 @@ k.section("PGM outputs") {
 }
 
 k.section("Online / offline health") {
-    def (a, env) = k.newApp([zoneCount: 2, partitionSet: "1-2", pgmSet: "1"])
-    a.initialize()
-    k.check("devices created before the connection is up start offline", env.children["uno-zone-1"].last("healthStatus") == "offline" && env.children["uno-partition-1"].last("healthStatus") == "offline" && env.children["uno-pgm-1"].last("healthStatus") == "offline")
+    def (a, conn, env) = k.newPair([zoneCount: 2, partitionSet: "1-2", pgmSet: "1"])
+    conn.save()
+    Map kids = conn.host.children
+    k.check("devices created before the connection is up start offline", kids["uno-zone-1"].last("healthStatus") == "offline" && kids["uno-partition-1"].last("healthStatus") == "offline" && env.children["uno-pgm-1"].last("healthStatus") == "offline")
 
-    a.notifyHealth("online")
-    def kids = env.children.keySet().findAll { it != "uno-connection" }.toList()
-    k.check("every child device is told when the connection comes online", kids.every { env.children[it].last("healthStatus") == "online" }, kids)
-    k.check("the connection device manages its own status", env.children["uno-connection"].last("healthStatus") == null)
+    conn.markHealth("online")
+    List mine = kids.keySet().toList()
+    k.check("every zone and partition is told when the connection comes online", mine.every { kids[it].last("healthStatus") == "online" }, mine)
+    k.check("and so is the app's own PGM device", env.children["uno-pgm-1"].last("healthStatus") == "online")
+    k.check("the connection device manages its own status", env.children["uno-connection"].currentValue("healthStatus") == "online" && a.state.health == "online")
 
     a.settings.zoneCount = 4
-    a.updated()
-    k.check("a device created while online starts online", env.children["uno-zone-4"].last("healthStatus") == "online")
+    conn.settings.zoneCount = 4
+    conn.save()
+    k.check("a device created while online starts online", kids["uno-zone-4"].last("healthStatus") == "online")
 
-    a.notifyHealth("offline")
-    k.check("and everything goes offline together", kids.every { env.children[it].last("healthStatus") == "offline" } && env.children["uno-zone-4"].last("healthStatus") == "offline")
+    conn.markHealth("offline")
+    k.check("and everything goes offline together", kids.keySet().every { kids[it].last("healthStatus") == "offline" } && env.children["uno-pgm-1"].last("healthStatus") == "offline")
 
     a.settings.zoneHints = "1:Basement Leak:water"
-    a.notifyHealth("online")
-    a.updated()
-    k.check("a zone recreated with another driver gets the current status", env.children["uno-zone-1"].typeName == "UNO Zone Water" && env.children["uno-zone-1"].last("healthStatus") == "online")
+    conn.markHealth("online")
+    conn.save()
+    k.check("a zone recreated with another driver gets the current status", kids["uno-zone-1"].typeName == "UNO Zone Water" && kids["uno-zone-1"].last("healthStatus") == "online")
 }
 
 k.section("Notifications") {
@@ -308,16 +321,16 @@ k.section("Event settings are pushed to the connection device") {
 }
 
 k.section("User names and zone names for event text") {
-    def (a, env) = k.newApp([zoneCount: 3, userNames: "2:Alice\n# comment\nbad line\n3 : Bob \n0:Nobody", zoneHints: "2:Front Door:contact"])
-    a.initialize()
+    def (a, conn, env) = k.newPair([zoneCount: 3, userNames: "2:Alice\n# comment\nbad line\n3 : Bob \n0:Nobody", zoneHints: "2:Front Door:contact"])
+    conn.save()
     k.check("a named user is found", a.userName(2) == "Alice", a.userName(2))
     k.check("spaces around the number and name are ignored", a.userName(3) == "Bob", a.userName(3))
     k.check("an unnamed user has no name", a.userName(4) == null)
     k.check("comments and bad lines are ignored", a.state.userNamesMap.keySet().sort() == ["0", "2", "3"], a.state.userNamesMap)
 
-    k.check("a zone with a real label is named", a.zoneName(2) == "Front Door", a.zoneName(2))
-    k.check("a zone that still has its default label has no name", a.zoneName(1) == null, a.zoneName(1))
-    k.check("a zone with no device has no name", a.zoneName(99) == null)
+    k.check("a zone with a real label is named", conn.zoneName(2) == "Front Door", conn.zoneName(2))
+    k.check("a zone that still has its default label has no name", conn.zoneName(1) == null, conn.zoneName(1))
+    k.check("a zone with no device has no name", conn.zoneName(99) == null)
 
     a.settings.userNames = "2:Carol"
     a.updated()
@@ -329,12 +342,12 @@ k.section("User names and zone names for event text") {
 }
 
 k.section("Zone name inference") {
-    def (a, env) = k.newApp([zoneCount: 1])
+    def conn = k.newConn()
     Map cases = ["Kitchen CO": "co", "Dining Room PIR": "motion", "Attic Heat": "smoke", "Basement Leak": "water",
                  "Front Door": "contact", "Back Courtyard Door": "contact", "Corner Window": "contact", "Wheat Room": null,
                  "Garage Entry": null, "Carbon Monoxide": "co"]
     cases.each { n, want ->
-        def got = a.inferTypeFromName(n)
+        def got = conn.inferTypeFromName(n)
         k.check("inferTypeFromName('${n}') == ${want}", got == want, got)
     }
 }

@@ -49,8 +49,12 @@ CodeNarc can't run on Groovy 2.4, so it is a Groovy 4 job. The 2.4 parse check a
 | `cases/30_connection_commands.groovy` | Commands to the UNO: queue and acks, arm, disarm, bypass, keypress, panic, REST sync |
 | `cases/40_child_drivers.groovy` | Partition and zone drivers |
 | `cases/45_child_features.groovy` | `applyZoneState` on every zone driver, arm with bypass on the partition, the status driver |
-| `cases/50_app.groovy` | Device creation, hints, partitions, zone sets, forwarding, setup checks |
+| `cases/50_app.groovy` | Device creation (by the connection device), hints, partitions, zone sets, forwarding, setup checks |
 | `cases/55_app_features.groovy` | Selective save, status device, connection-lost alert, quiet hours, partition filter, repeat suppression, stale sensors, zones per partition (including changing partitions or zones afterwards), keepalive and timeout settings |
+| `cases/84_device_prefix.groovy` | The name prefix on partitions and zones only, changing it, hand-made names, the length limit |
+| `cases/85_zone_names.groovy` | Loading the UNO's zone names, naming and typing each zone in the app, keeping names changed on the Devices page |
+| `cases/86_device_tree.groovy` | The partitions and zones live under the connection device, and the move from the earlier layout |
+| `cases/83_ack_race.groovy` | A reply that reaches the hub before the command is saved as sent, and no connection before an address is set |
 | `cases/60_range_parity.groovy` | The app and the connection driver parse range strings identically |
 | `cases/70_spec_conformance.groovy` | The TPI spec's own examples, the exact bytes of every command, response codes and partition states |
 | `cases/75_robustness.groovy` | Empty, malformed and missing settings and state never crash setup or frame handling (regression guard for an envisalink_new bug where an empty partition spec made a fallback call `.append()` on `None`) |
@@ -77,6 +81,12 @@ k.section("Arm commands") {
 Useful helpers: `k.newConn(settings)`, `k.authed(settings)`, `k.feed(d, "%02,01...$")` to deliver a frame,
 `k.ack(d, "08")` to acknowledge the in-flight command, and `k.newApp(settings, restMeta)` which returns
 `[app, env]` where `env` records the devices the app created or deleted.
+
+The partitions and zones are children of the connection driver, so `newConn` gives the driver a mock `parent` whose
+`children` map holds them (`d.parent.children["uno-zone-2"]`, `d.parent.zoneChildren()`). To test the app and the
+connection driver together, use `k.newPair(settings, restMeta)`, which returns `[app, conn, env]`: the real app and the
+real driver wired to each other. `conn.save()` does what the hub does after **Done**, and `conn.host.children` holds the
+devices the driver made (`env.children` is only the app's own: connection, PGM, status).
 
 ## Limits
 

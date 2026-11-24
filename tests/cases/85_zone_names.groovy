@@ -1,13 +1,14 @@
-// Zone names from the UNO, renaming them in the app, and keeping names changed on the Devices page.
+// Zone names from the UNO, renaming them in the app, and keeping names changed on the Devices page. The app says what
+// each zone is called; the connection device, which owns the zone devices, applies it.
 
 def meta = { List names -> ["zone labels": names, "partition labels": []] }
-def labels = { env -> env.children.collectEntries { String dni, c -> [(dni): c.label] }.findAll { it.key.startsWith("uno-zone-") } }
+def labels = { conn -> conn.host.children.collectEntries { String dni, c -> [(dni): c.label] }.findAll { it.key.startsWith("uno-zone-") } }
 
 k.section("The UNO's names are used when the zones are created") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: true], meta(["Basement Back Do", "Foyer Motion Sen"]))
-    a.initialize()
-    k.check("each zone gets its stored name", labels(env) == ["uno-zone-1": "Basement Back Do", "uno-zone-2": "Foyer Motion Sen"], labels(env))
-    k.check("a name with 'motion' in it makes a motion zone", env.children["uno-zone-2"].typeName == "UNO Zone Motion", env.children["uno-zone-2"].typeName)
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: true], meta(["Basement Back Do", "Foyer Motion Sen"]))
+    conn.save()
+    k.check("each zone gets its stored name", labels(conn) == ["uno-zone-1": "Basement Back Do", "uno-zone-2": "Foyer Motion Sen"], labels(conn))
+    k.check("a name with 'motion' in it makes a motion zone", conn.host.children["uno-zone-2"].typeName == "UNO Zone Motion", conn.host.children["uno-zone-2"].typeName)
 }
 
 k.section("The button loads the names before setup is finished") {
@@ -38,84 +39,104 @@ k.section("The button loads the names before setup is finished") {
 }
 
 k.section("A name typed for a zone wins, and clearing it goes back to the UNO's name") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: true, zoneName_1: "Basement Back Door", zoneHints: "1:From Hints:contact"], meta(["Basement Back Do", "Foyer Motion Sen"]))
-    a.initialize()
-    k.check("it beats both the UNO's name and the hint", labels(env)["uno-zone-1"] == "Basement Back Door", labels(env))
-    k.check("a zone with no name typed keeps the UNO's", labels(env)["uno-zone-2"] == "Foyer Motion Sen", labels(env))
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: true, zoneName_1: "Basement Back Door", zoneHints: "1:From Hints:contact"], meta(["Basement Back Do", "Foyer Motion Sen"]))
+    conn.save()
+    k.check("it beats both the UNO's name and the hint", labels(conn)["uno-zone-1"] == "Basement Back Door", labels(conn))
+    k.check("a zone with no name typed keeps the UNO's", labels(conn)["uno-zone-2"] == "Foyer Motion Sen", labels(conn))
 
     a.settings.zoneName_1 = "  "
-    a.initialize()
-    k.check("blank means the hint then", labels(env)["uno-zone-1"] == "From Hints", labels(env))
+    conn.save()
+    k.check("blank means the hint then", labels(conn)["uno-zone-1"] == "From Hints", labels(conn))
 
     a.settings.zoneHints = ""
-    a.initialize()
-    k.check("and then the UNO's name", labels(env)["uno-zone-1"] == "Basement Back Do", labels(env))
+    conn.save()
+    k.check("and then the UNO's name", labels(conn)["uno-zone-1"] == "Basement Back Do", labels(conn))
 }
 
 k.section("A type chosen for a zone wins") {
-    def (a, env) = k.newApp([zoneCount: 3, useRestMetadata: true, zoneType_1: "smoke", zoneType_2: "auto", zoneType_3: "water"],
-                            meta(["Hall Thing", "Foyer Motion Sen", "Kitchen Thing"]))
-    a.initialize()
-    k.check("smoke and water as chosen", env.children["uno-zone-1"].typeName == "UNO Zone Smoke" && env.children["uno-zone-3"].typeName == "UNO Zone Water", [env.children["uno-zone-1"].typeName, env.children["uno-zone-3"].typeName])
-    k.check("automatic still reads the name", env.children["uno-zone-2"].typeName == "UNO Zone Motion", env.children["uno-zone-2"].typeName)
+    def (a, conn, env) = k.newPair([zoneCount: 3, useRestMetadata: true, zoneType_1: "smoke", zoneType_2: "auto", zoneType_3: "water"],
+                                   meta(["Hall Thing", "Foyer Motion Sen", "Kitchen Thing"]))
+    conn.save()
+    Map kids = conn.host.children
+    k.check("smoke and water as chosen", kids["uno-zone-1"].typeName == "UNO Zone Smoke" && kids["uno-zone-3"].typeName == "UNO Zone Water", [kids["uno-zone-1"].typeName, kids["uno-zone-3"].typeName])
+    k.check("automatic still reads the name", kids["uno-zone-2"].typeName == "UNO Zone Motion", kids["uno-zone-2"].typeName)
 
     a.settings.zoneType_1 = "motion"
-    a.initialize()
-    k.check("changing it swaps the driver", env.children["uno-zone-1"].typeName == "UNO Zone Motion", env.children["uno-zone-1"].typeName)
+    conn.save()
+    k.check("changing it swaps the driver", conn.host.children["uno-zone-1"].typeName == "UNO Zone Motion", conn.host.children["uno-zone-1"].typeName)
 }
 
 k.section("A name changed on the Devices page is kept") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: true], meta(["Basement Back Do", "Foyer Motion Sen"]))
-    a.initialize()
-    env.children["uno-zone-1"].label = "Back Door"
-    a.initialize()
-    k.check("saving the app does not put the UNO's name back", labels(env)["uno-zone-1"] == "Back Door", labels(env))
-    k.check("a zone nobody renamed is unchanged", labels(env)["uno-zone-2"] == "Foyer Motion Sen", labels(env))
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: true], meta(["Basement Back Do", "Foyer Motion Sen"]))
+    conn.save()
+    conn.host.children["uno-zone-1"].label = "Back Door"
+    conn.save()
+    k.check("saving the app does not put the UNO's name back", labels(conn)["uno-zone-1"] == "Back Door", labels(conn))
+    k.check("a zone nobody renamed is unchanged", labels(conn)["uno-zone-2"] == "Foyer Motion Sen", labels(conn))
 
     a.settings.zoneName_1 = "Basement Back Door"
-    a.initialize()
-    k.check("a name typed in the app still takes over", labels(env)["uno-zone-1"] == "Basement Back Door", labels(env))
+    conn.save()
+    k.check("a name typed in the app still takes over", labels(conn)["uno-zone-1"] == "Basement Back Door", labels(conn))
 }
 
 k.section("A change of name on the UNO follows through unless the label was changed by hand") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: true], meta(["Old Name One", "Old Name Two"]))
-    a.initialize()
-    env.children["uno-zone-2"].label = "My Name"
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: true], meta(["Old Name One", "Old Name Two"]))
+    conn.save()
+    conn.host.children["uno-zone-2"].label = "My Name"
 
     a.httpGetImpl = { Map p -> [status: 200, data: meta(["New Name One", "New Name Two"])] }
-    a.initialize()
-    k.check("an untouched zone gets the new name", labels(env)["uno-zone-1"] == "New Name One", labels(env))
-    k.check("a renamed one keeps its own", labels(env)["uno-zone-2"] == "My Name", labels(env))
+    conn.save()
+    k.check("an untouched zone gets the new name", labels(conn)["uno-zone-1"] == "New Name One", labels(conn))
+    k.check("a renamed one keeps its own", labels(conn)["uno-zone-2"] == "My Name", labels(conn))
+}
+
+k.section("A name that is just the UNO's own is not a choice") {
+    def (a, conn, env) = k.newPair([zoneCount: 1, useRestMetadata: true, zoneName_1: "Old Name", zoneHints: "1:From Hints:contact"], meta(["Old Name"]))
+    conn.save()
+    k.check("a pre-filled box (saved as if typed) doesn't hide the hint", labels(conn)["uno-zone-1"] == "From Hints", labels(conn))
+
+    a.settings.zoneHints = ""
+    a.httpGetImpl = { Map p -> [status: 200, data: meta(["Renamed On UNO"])] }
+    a.settings.zoneName_1 = "Renamed On UNO"
+    conn.save()
+    k.check("and the UNO's name is followed", labels(conn)["uno-zone-1"] == "Renamed On UNO", labels(conn))
+
+    a.httpGetImpl = { Map p -> [status: 200, data: meta(["Renamed Again"])] }
+    a.settings.zoneName_1 = null
+    conn.save()
+    k.check("and again when the box is empty", labels(conn)["uno-zone-1"] == "Renamed Again", labels(conn))
 }
 
 k.section("A zone that was created before the UNO's names were known gets its name") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: false])
-    a.initialize()
-    k.check("it starts with the default", labels(env)["uno-zone-1"] == "Zone 1", labels(env))
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: false])
+    conn.save()
+    k.check("it starts with the default", labels(conn)["uno-zone-1"] == "Zone 1", labels(conn))
 
     a.state.restZoneLabels = ["1": "Front Door"]
-    a.initialize()
-    k.check("and takes the name once it is loaded", labels(env)["uno-zone-1"] == "Front Door", labels(env))
+    conn.save()
+    k.check("and takes the name once it is loaded", labels(conn)["uno-zone-1"] == "Front Door", labels(conn))
 }
 
 k.section("The prefix works with all of it") {
-    def (a, env) = k.newApp([zoneCount: 2, useRestMetadata: true, devicePrefix: "Alarm", zoneName_2: "Side Door"], meta(["Front", "Foyer Motion Sen"]))
-    a.initialize()
-    k.check("UNO names and typed names are both prefixed", labels(env) == ["uno-zone-1": "Alarm Front", "uno-zone-2": "Alarm Side Door"], labels(env))
+    def (a, conn, env) = k.newPair([zoneCount: 2, useRestMetadata: true, devicePrefix: "Alarm", zoneName_2: "Side Door"], meta(["Front", "Foyer Motion Sen"]))
+    conn.save()
+    k.check("UNO names and typed names are both prefixed", labels(conn) == ["uno-zone-1": "Alarm Front", "uno-zone-2": "Alarm Side Door"], labels(conn))
 
-    env.children["uno-zone-1"].label = "Alarm Porch"
-    a.initialize()
-    k.check("a hand-made name is kept with the prefix, once", labels(env)["uno-zone-1"] == "Alarm Porch", labels(env))
+    conn.host.children["uno-zone-1"].label = "Alarm Porch"
+    conn.save()
+    k.check("a hand-made name is kept with the prefix, once", labels(conn)["uno-zone-1"] == "Alarm Porch", labels(conn))
 }
 
 k.section("Saving again writes nothing new") {
-    def (a, env) = k.newApp([zoneCount: 3, useRestMetadata: true], meta(["A", "B", "C"]))
-    a.initialize()
-    def before = a.state.appliedLabels
-    a.initialize()
-    k.check("the remembered names are the same", a.state.appliedLabels == before && before == ["1": "A", "2": "B", "3": "C"], a.state.appliedLabels)
-    k.check("and no device was created or deleted the second time", env.created.size() == 5 && env.deleted.isEmpty(), [env.created.size(), env.deleted])
+    def (a, conn, env) = k.newPair([zoneCount: 3, useRestMetadata: true], meta(["A", "B", "C"]))
+    conn.save()
+    def before = conn.state.appliedLabels
+    conn.host.created.clear()
+    conn.save()
+    k.check("the remembered names are the same", conn.state.appliedLabels == before && before == ["1": "A", "2": "B", "3": "C"], conn.state.appliedLabels)
+    k.check("and no device was created or deleted the second time", conn.host.created.isEmpty() && conn.host.deleted.isEmpty(), [conn.host.created, conn.host.deleted])
 }
+
 k.section("The settings page offers a name and type for each configured zone") {
     def (a, env) = k.newApp([zoneCount: 5, zoneSet: "1-2,5", useRestMetadata: false], meta(["Basement Back Do", "Foyer Motion Sen"]))
     def inputs = [:]
@@ -129,6 +150,7 @@ k.section("The settings page offers a name and type for each configured zone") {
 
     k.check("one name and one type per zone in the zone set, and none for the rest",
         inputs.keySet().findAll { it.startsWith("zoneName_") || it.startsWith("zoneType_") }.sort() == ["zoneName_1", "zoneName_2", "zoneName_5", "zoneType_1", "zoneType_2", "zoneType_5"], inputs.keySet())
-    k.check("each shows the UNO's name", inputs["zoneName_1"].description == "UNO name: Basement Back Do" && inputs["zoneName_5"].description == "No name stored on the UNO", [inputs["zoneName_1"].description, inputs["zoneName_5"].description])
+    k.check("each name box is pre-filled with the UNO's name, with no 'UNO name:' label", inputs["zoneName_1"].defaultValue == "Basement Back Do" && inputs["zoneName_2"].defaultValue == "Foyer Motion Sen" && inputs["zoneName_1"].description == null, [inputs["zoneName_1"]])
+    k.check("a zone the UNO has no name for is left empty", inputs["zoneName_5"].defaultValue == null && inputs["zoneName_5"].description == "No name stored on the UNO", inputs["zoneName_5"])
     k.check("the button is on the page", inputs.containsKey("loadZoneNames"))
 }

@@ -13,15 +13,16 @@ def badSpecs = [null, "", "   ", "0", "9", "129", "abc", "1,,2", "-", "1-", "-3"
 
 k.section("App setup survives bad partition sets") {
     badSpecs.each { spec ->
-        def (a, env) = k.newApp([zoneCount: 3, partitionSet: spec])
+        def (a, conn, env) = k.newPair([zoneCount: 3, partitionSet: spec])
         boolean ok = true
-        try { a.initialize() } catch (Throwable t) { ok = false; println "    partitionSet=${spec}: ${t}" }
+        try { conn.save() } catch (Throwable t) { ok = false; println "    partitionSet=${spec}: ${t}" }
         k.check("partitionSet ${spec == null ? 'null' : '\"' + spec + '\"'}: setup completes", ok)
         if (ok && !(spec in ["1;2", "1,,2"])) {
             // Unusable input falls back to partition 1 (and the zones still get created).
             boolean usable = spec != null && spec.replaceAll("\\s", "") ==~ /\d+(-\d+)?(,\d+(-\d+)?)*/ && !(spec in ["0", "9", "129", "3-1", "99999999999"])
             if (!usable) {
-                k.check("  falls back to partition 1 and still creates the zones", env.children.containsKey("uno-partition-1") && env.children.keySet().findAll { it.startsWith("uno-partition-") }.size() == 1 && env.children.containsKey("uno-zone-3"), env.children.keySet())
+                Map kids = conn.host.children
+                k.check("  falls back to partition 1 and still creates the zones", kids.containsKey("uno-partition-1") && kids.keySet().findAll { it.startsWith("uno-partition-") }.size() == 1 && kids.containsKey("uno-zone-3"), kids.keySet())
             }
         }
     }
@@ -123,17 +124,17 @@ k.section("Frames for devices that don't exist yet") {
     } catch (Throwable t) { ok = false; println "    ${t}" }
     k.check("with no parent app at all nothing crashes", ok && d.lastAttr("alarmSystemStatus") == "disarmed", d.warns())
 
-    def (a, env) = k.newApp([zoneCount: 3, partitionSet: "1"])
-    a.initialize()
+    def (a, conn, env) = k.newPair([zoneCount: 3, partitionSet: "1"])
+    conn.save()
     boolean ok2 = true
     try {
-        (1..8).each { p -> a.notifyPartitionState(p, "armedAway"); a.notifyPartitionEvents(p, [[name: "lastEvent", value: "x"]]) }
+        (1..8).each { p -> conn.sendPartitionState(p, "armedAway"); conn.sendPartitionEvents(p, [[name: "lastEvent", value: "x"]]) }
         a.notifyPgmEvents(7, [[name: "lastTriggered", value: "now"]])
         a.notifyPanelSummary([openZones: "zone 1"])
         a.notifyHealth("online")
     } catch (Throwable t) { ok2 = false; println "    ${t}" }
     k.check("updates for partitions and PGMs that have no device are ignored", ok2)
-    k.check("partition 1 still got its update", env.children["uno-partition-1"].alarmStates == ["armedAway"], env.children["uno-partition-1"].alarmStates)
+    k.check("partition 1 still got its update", conn.host.children["uno-partition-1"].alarmStates == ["armedAway"], conn.host.children["uno-partition-1"].alarmStates)
 }
 
 k.section("Range parsers reject numbers too long to be valid (they used to throw)") {
@@ -152,7 +153,7 @@ k.section("Range parsers reject numbers too long to be valid (they used to throw
 k.section("A partition line with no usable zones is not an assignment") {
     def (a, env) = k.newApp([zoneCount: 4, partitionSet: "1-2"])
     Map p = a.parsePartitionZones("1:\n2:9\n1:abc")
-    k.check("none of them create an assignment", p.assignments.isEmpty() && a.hasPartitionZones() == false, p)
+    k.check("none of them create an assignment", p.assignments.isEmpty(), p)
     k.check("and each is reported", p.problems.any { it.contains("zone 9 is not one of your zones") } && p.problems.any { it.contains("partition 2 has no zones") || it.contains("partition 1 has no zones") } && p.problems.any { it.contains("not valid zone numbers: abc") }, p.problems)
 
     def d = k.newConn(partitionZones: "1:;2:99")

@@ -144,7 +144,7 @@ k.section("Zone bypass state (command 04)") {
 
     def n = k.authed(zoneCount: 8)
     k.feed(n, "%04,01000000000000000000000000000000\$")
-    k.check("bypass frames never create zone devices", n.parent.children.isEmpty() && n.parent.upserts.isEmpty())
+    k.check("bypass frames never create zone devices", n.parent.zoneChildren().isEmpty() && n.parent.upserts.isEmpty())
 
     def bad = k.authed()
     k.feed(bad, "%04,NOPE\$")
@@ -154,7 +154,7 @@ k.section("Zone bypass state (command 04)") {
 k.section("CID events (command 03)") {
     def d = k.authed(zoneCount: 27)
     k.feed(d, "%03,3441010020\$")   // spec example: restoral of stay arm by user 2
-    k.check("arm/disarm (user id) does NOT create a zone", d.parent.upserts.isEmpty() && d.parent.children.isEmpty(), d.parent.upserts)
+    k.check("arm/disarm (user id) does NOT create a zone", d.parent.upserts.isEmpty() && d.parent.zoneChildren().isEmpty(), d.parent.upserts)
     k.check("lastCidEvent set", d.lastAttr("lastCidEvent")?.contains("code=441"), d.lastAttr("lastCidEvent"))
     k.feed(d, "%03,1401010990\$")
     k.check("user number 99 doesn't create zone 99", d.parent.children["uno-zone-99"] == null)
@@ -163,7 +163,7 @@ k.section("CID events (command 03)") {
     k.feed(d, "%03,3130010050\$")
     k.check("restoral closes zone 5", d.parent.children["uno-zone-5"]?.last("contact") == "closed")
     k.feed(d, "%03,1110010070\$")
-    k.check("fire code passes smoke suggestion to upsert", d.parent.upserts.any { it[0] == 7 && it[1] == "smoke" }, d.parent.upserts)
+    k.check("a fire code makes the zone a smoke device", d.parent.children["uno-zone-7"]?.typeName == "UNO Zone Smoke", d.parent.children["uno-zone-7"]?.typeName)
     k.feed(d, "%03,1130019990\$")
     k.check("zone above count ignored", d.parent.children["uno-zone-999"] == null)
     k.feed(d, "%03,12\$")

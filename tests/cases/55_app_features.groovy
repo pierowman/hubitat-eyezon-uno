@@ -7,16 +7,19 @@ k.section("Saving only restarts the connection when it has to") {
     def (a, env) = k.newApp([zoneCount: 3])
     a.initialize()
     def conn = env.children["uno-connection"]
+    // Every save also asks the connection device to sync its partitions and zones (a timer), which is not a restart.
+    def pend = { a.pending.findAll { it.key != "syncConnectionDevices" } }
     k.check("the first save pushes every setting and starts the connection", conn.settingsUpdated.size() == 19 && a.pending.containsKey("initializeConnection"), [conn.settingsUpdated.size(), a.pending])
+    k.check("and has the connection device sync its devices", a.pending.containsKey("syncConnectionDevices"), a.pending)
     k.check("the password is never copied into the app's state", a.state.pushedSettings.size() == 19 && a.state.pushedSettings.values().every { !it.contains("pw") }, a.state.pushedSettings)
 
     a.pending.clear(); conn.settingsUpdated.clear()
     a.updated()
-    k.check("saving with no changes pushes nothing and leaves the connection alone", conn.settingsUpdated.isEmpty() && a.pending.isEmpty(), [conn.settingsUpdated, a.pending])
+    k.check("saving with no changes pushes nothing and leaves the connection alone", conn.settingsUpdated.isEmpty() && pend().isEmpty(), [conn.settingsUpdated, a.pending])
 
     a.settings.notifyAlarms = false; a.settings.partitionHints = "1:Home"; a.settings.userNames = "2:Alice"
     a.updated()
-    k.check("names and notification options don't touch the connection", conn.settingsUpdated.isEmpty() && a.pending.isEmpty())
+    k.check("names and notification options don't touch the connection", conn.settingsUpdated.isEmpty() && pend().isEmpty())
 
     a.settings.enablePanic = true
     a.updated()
@@ -34,25 +37,33 @@ k.section("Saving only restarts the connection when it has to") {
         k.check("changing ${name} restarts the connection", a.pending.containsKey("initializeConnection"), a.pending)
     }
 
-    a.pending.clear(); conn.settingsUpdated.clear()
-    a.settings.zoneSet = ""
-    a.settings.zoneCount = 4
-    a.updated()
-    a.pending.clear()
-    a.settings.zoneHints = "1:Leak:water"
-    a.updated()
-    k.check("a recreated device is announced to without a reconnect", env.children["uno-zone-1"].typeName == "UNO Zone Water" && a.pending.containsKey("resyncConnection") && !a.pending.containsKey("initializeConnection"), a.pending)
-
     a.state.startedVersion = "1.2.0"
     a.pending.clear()
     a.updated()
-    k.check("an updated app restarts the connection once", a.pending.containsKey("initializeConnection") && a.state.startedVersion == "1.3.1")
+    k.check("an updated app restarts the connection once", a.pending.containsKey("initializeConnection") && a.state.startedVersion == "1.4.0")
 
     env.children.remove("uno-connection")
     a.pending.clear()
     a.updated()
     def fresh = env.children["uno-connection"]
     k.check("a recreated connection device gets every setting again", fresh.settingsUpdated.size() == 19 && a.pending.containsKey("initializeConnection"), fresh.settingsUpdated.size())
+}
+
+k.section("Devices the connection device makes are announced to without a reconnect") {
+    def (a, conn, env) = k.newPair([zoneCount: 3])
+    conn.save()
+    conn.pending.clear()
+    a.settings.zoneHints = "1:Leak:water"
+    conn.save()
+    k.check("a zone made again with another driver has the panel announce everything", conn.host.children["uno-zone-1"].typeName == "UNO Zone Water" && conn.pending.containsKey("resyncStates"), conn.pending)
+
+    conn.pending.clear()
+    conn.save()
+    k.check("saving again with nothing new does not", !conn.pending.containsKey("resyncStates"), conn.pending)
+
+    def (b, connB, envB) = k.newPair([zoneCount: 2])
+    connB.save()
+    k.check("the first save, which makes every device, does", connB.pending.containsKey("resyncStates"), connB.pending)
 }
 
 k.section("Status device and panel summary") {
@@ -73,18 +84,11 @@ k.section("Status device and panel summary") {
 
     a.notifyPanelSummary([openZones: "zone 7", troubleSummary: "none"])
     k.check("summaries are forwarded to it", s.last("openZones") == "zone 7" && s.last("troubleSummary") == "none")
-    def p1 = env.children["uno-partition-1"]
-    k.check("with one partition its device shows the zones, but not the troubles", p1.last("openZones") == "zone 7" && p1.last("troubleSummary") == null, p1.events)
-
-    def (m, envM) = k.newApp([zoneCount: 1, partitionSet: "1-2", createStatusDevice: true])
-    m.initialize()
-    m.notifyPanelSummary([openZones: "zone 7"])
-    k.check("with several partitions only the status device shows them (zones aren't tied to a partition)", envM.children["uno-status"].last("openZones") == "zone 7" && envM.children["uno-partition-1"].last("openZones") == null && envM.children["uno-partition-2"].last("openZones") == null)
 
     def (n, envN) = k.newApp([zoneCount: 1])
     n.initialize()
     n.notifyPanelSummary([openZones: "zone 7"])
-    k.check("a summary with no status device is fine", envN.children["uno-status"] == null && envN.children["uno-partition-1"].last("openZones") == "zone 7")
+    k.check("a summary with no status device is fine", envN.children["uno-status"] == null)
 
     def (x, envX) = k.newApp([zoneCount: 1, createStatusDevice: true])
     x.metaClass.addChildDevice = { String ns, String type, String dni, Map props ->
@@ -92,7 +96,30 @@ k.section("Status device and panel summary") {
         envX.created << [dni, type]; envX.children[dni] = new MockChild(dni: dni, typeName: type, label: props.label)
     }
     x.initialize()
-    k.check("a missing driver is reported without breaking the rest", x.warns().any { it.contains("UNO Status") } && envX.children["uno-connection"] != null && envX.children["uno-partition-1"] != null, x.warns())
+    k.check("a missing driver is reported without breaking the rest", x.warns().any { it.contains("UNO Status") } && envX.children["uno-connection"] != null && x.pending.containsKey("syncConnectionDevices"), x.warns())
+}
+
+k.section("The partition shows the zone lists when it is the only one") {
+    def (a, conn, env) = k.newPair([zoneCount: 1, createStatusDevice: true])
+    conn.sendEvent(name: "openZones", value: "zone 3")
+    conn.sendEvent(name: "bypassedZones", value: "none")
+    conn.save()
+    Map kids = conn.host.children
+    k.check("a partition made after the lists exist is brought up to date", kids["uno-partition-1"].last("openZones") == "zone 3" && kids["uno-partition-1"].last("bypassedZones") == "none", kids["uno-partition-1"].events)
+
+    conn.forwardPartitionSummary([openZones: "zone 7", troubleSummary: "none"])
+    k.check("with one partition its device shows the zones, but not the troubles", kids["uno-partition-1"].last("openZones") == "zone 7" && kids["uno-partition-1"].last("troubleSummary") == null, kids["uno-partition-1"].events)
+
+    def (m, connM, envM) = k.newPair([zoneCount: 1, partitionSet: "1-2", createStatusDevice: true])
+    connM.save()
+    connM.forwardPartitionSummary([openZones: "zone 7"])
+    m.notifyPanelSummary([openZones: "zone 7"])
+    k.check("with several partitions only the status device shows them (zones aren't tied to a partition)", envM.children["uno-status"].last("openZones") == "zone 7" && connM.host.children["uno-partition-1"].last("openZones") == null && connM.host.children["uno-partition-2"].last("openZones") == null)
+
+    def (z, connZ, envZ) = k.newPair([zoneCount: 4, partitionZones: "1:1-2"])
+    connZ.save()
+    connZ.forwardPartitionSummary([openZones: "zone 2"])
+    k.check("with zones assigned to partitions the partition gets its own lists instead", connZ.host.children["uno-partition-1"].last("openZones") == null)
 }
 
 k.section("Connection lost alert") {
@@ -206,9 +233,11 @@ k.section("Quiet hours, partition filter and repeats") {
 }
 
 k.section("Stale sensors") {
-    def (a, env) = k.newApp([zoneCount: 3, createStatusDevice: true])
-    a.nowMs = at(12, 0)
-    a.initialize()
+    def (a, conn, env) = k.newPair([zoneCount: 3, createStatusDevice: true])
+    def tick = { long ms -> a.nowMs += ms; conn.nowMs = a.nowMs }
+    a.nowMs = at(12, 0); conn.nowMs = a.nowMs
+    a.initialize(); a.syncConnectionDevices()
+    Map kids = conn.host.children
     k.check("not scheduled while off", !a.scheduleCalls.any { it[0] == "staleSensorCheck" })
 
     a.settings.staleSensorDays = 3
@@ -218,9 +247,9 @@ k.section("Stale sensors") {
     MockNotifier n = new MockNotifier()
     a.settings.notifyDevices = [n]
     def fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
-    env.children["uno-zone-1"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs - 5 * 86400000L)))
-    env.children["uno-zone-2"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs - 1 * 86400000L)))
-    env.children["uno-zone-1"].label = "Garage Door"
+    kids["uno-zone-1"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs - 5 * 86400000L)))
+    kids["uno-zone-2"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs - 1 * 86400000L)))
+    kids["uno-zone-1"].label = "Garage Door"
 
     a.staleSensorCheck()
     String status = env.children["uno-status"].last("staleSensors")
@@ -231,14 +260,14 @@ k.section("Stale sensors") {
     a.staleSensorCheck()
     k.check("the same list isn't sent again", n.messages.size() == 1)
 
-    a.nowMs += 4 * 86400000L
+    tick(4 * 86400000L)
     a.staleSensorCheck()
-    k.check("later, quiet zones and never-triggered zones are included", env.children["uno-status"].last("staleSensors") == "Garage Door, Zone 2, Zone 3" || env.children["uno-status"].last("staleSensors") == "Garage Door, Zone 2, Zone 3".toString(), env.children["uno-status"].last("staleSensors"))
+    k.check("later, quiet zones and never-triggered zones are included", env.children["uno-status"].last("staleSensors") == "Garage Door, Zone 2, Zone 3", env.children["uno-status"].last("staleSensors"))
     k.check("and a changed list is sent", n.messages.size() == 2 && n.messages[1].contains("Zone 3"), n.messages)
 
-    env.children["uno-zone-1"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
-    env.children["uno-zone-2"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
-    env.children["uno-zone-3"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
+    kids["uno-zone-1"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
+    kids["uno-zone-2"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
+    kids["uno-zone-3"].sendEvent(name: "lastFault", value: fmt.format(new Date(a.nowMs)))
     a.staleSensorCheck()
     k.check("when everything has reported the list is empty", env.children["uno-status"].last("staleSensors") == "none")
 
@@ -275,15 +304,12 @@ k.section("Zones per partition") {
     n.initialize()
     k.check("nothing pushed means no assignments", envN.children["uno-connection"].settingsUpdated.any { it[0] == "partitionZones" && it[1].value == "" } && n.partitionZonesPreview().startsWith("No zones assigned"))
 
-    // With one partition and no assignments the panel-wide lists are copied to it; assignments take over from that.
+    // With one partition and no assignments the panel-wide lists are copied to it; assignments take over from that
+    // (the connection device does this, since the partition is its own child: see "The partition shows the zone lists").
     def (m, envM) = k.newApp([zoneCount: 5, partitionZones: "1:1-2"])
     m.initialize()
     m.notifyPanelSummary([openZones: "zone 4", bypassedZones: "none"])
-    k.check("with assignments the app no longer copies the panel-wide lists to the partition", envM.children["uno-partition-1"].last("openZones") == null, envM.children["uno-partition-1"].events)
-    envM.children["uno-connection"].sendEvent(name: "openZones", value: "zone 4")
-    m.applyPanelSummary(envM.children["uno-partition-1"])
-    k.check("nor to a newly created partition device", envM.children["uno-partition-1"].last("openZones") == null)
-
+    k.check("the app has no partition devices to copy the lists to", envM.children.keySet().every { !it.startsWith("uno-partition-") }, envM.children.keySet())
     // Changing assignments re-announces without a reconnect.
     conn.settingsUpdated.clear(); a.pending.clear()
     a.settings.partitionZones = "1:1-2\n2:3-5"
@@ -358,7 +384,7 @@ k.section("Changing partitions or zones after zones were assigned never blocks s
     boolean saved3 = true
     try { a.updated() } catch (Throwable t) { saved3 = false }
     k.check("even when no assignment is valid any more, it saves", saved3 && pushed() == "", pushed())
-    k.check("and that is no longer an assignment, so partitions fall back to the default behaviour", a.hasPartitionZones() == false)
+    k.check("and that is no longer an assignment", a.parsePartitionZones(a.settings.partitionZones).assignments.isEmpty())
 }
 
 k.section("The page refreshes its previews as settings change") {

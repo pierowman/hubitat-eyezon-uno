@@ -67,24 +67,26 @@ k.section("The watchdog's timestamp") {
 
 k.section("Zone names for the open lists are looked up once, not per list") {
     def d = k.authed(zoneCount: 10, partitionZones: "1:1-5;2:6-10")
-    int lookups = 0
     d.parent.zoneNames[2] = "Kitchen"; d.parent.zoneNames[7] = "Garage"
-    d.parent.metaClass.zoneName = { Integer z -> lookups++; delegate.zoneNames[z] }
+    // A name is the label of the zone's device, so a lookup is a read of it.
+    def reads = { -> d.parent.zoneChildren().values().sum { it.labelReads } as int }
+    def resetReads = { -> d.parent.zoneChildren().values().each { it.labelReads = 0 } }
+    resetReads()
 
     k.feed(d, "%01," + bitmap([2, 7]) + "\$")
-    int firstLookups = lookups
+    int firstLookups = reads()
     k.check("the first change looks each open zone up once, however many lists use it", firstLookups == 2, firstLookups)
     k.check("and uses the names", d.lastAttr("openZones") == "Kitchen (zone 2), Garage (zone 7)" && d.parent.partitionAttr(2, "openZones") == "Garage (zone 7)", d.lastAttr("openZones"))
 
-    lookups = 0
+    resetReads()
     k.feed(d, "%04," + bitmap([2]) + "\$")
     k.feed(d, "%01," + bitmap([2, 7, 8]) + "\$")
-    k.check("later changes within a minute make only the lookups for zones not seen yet", lookups == 1, lookups)
+    k.check("later changes within a minute make only the lookups for zones not seen yet", reads() == 1, reads())
 
     d.nowMs += 30000L
-    lookups = 0
+    resetReads()
     k.feed(d, "%01," + bitmap([2, 7]) + "\$")
-    k.check("still cached after 30 seconds", lookups == 0, lookups)
+    k.check("still cached after 30 seconds", reads() == 0, reads())
 
     d.parent.zoneNames[2] = "Back Kitchen"
     d.nowMs += 31000L
@@ -96,14 +98,14 @@ k.section("Zone names for the open lists are looked up once, not per list") {
     k.check("event text always uses the current name, not the cache", d.lastAttr("lastEvent") == "Burglary alarm: Pantry (zone 2)", d.lastAttr("lastEvent"))
 
     d.initialize(); d.parse(k.hex("Login:")); d.parse(k.hex("OK\r\n"))
-    lookups = 0
+    resetReads()
     k.feed(d, "%01," + bitmap([2]) + "\$")
-    k.check("restarting the connection clears the cache", d.lastAttr("openZones") == "Pantry (zone 2)" && lookups >= 1, [d.lastAttr("openZones"), lookups])
+    k.check("restarting the connection clears the cache", d.lastAttr("openZones") == "Pantry (zone 2)" && reads() >= 1, [d.lastAttr("openZones"), reads()])
 }
 
 k.section("A zone with no name is listed by number, and the lookup can fail") {
     def d = k.authed()
-    d.parent.metaClass.zoneName = { Integer z -> throw new IllegalStateException("app busy") }
+    d.parent.host.make("UNO Zone Contact", "uno-zone-3", [name: "UNO Zone 3", label: "x"]).metaClass.getLabel = { throw new IllegalStateException("device busy") }
     boolean threw = false
     try { k.feed(d, "%01," + bitmap([3]) + "\$") } catch (Throwable t) { threw = true }
     k.check("a failing lookup doesn't break the list", !threw && d.lastAttr("openZones") == "zone 3", d.lastAttr("openZones"))

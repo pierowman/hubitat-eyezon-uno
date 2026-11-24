@@ -25,7 +25,7 @@ k.section("Tamper is not an open zone") {
 
     def n = k.authed(zoneCount: 27)
     k.feed(n, "%03,1137010050\$")
-    k.check("a tamper never creates a zone device", n.parent.children.isEmpty() && n.parent.upserts.isEmpty())
+    k.check("a tamper never creates a zone device", n.parent.zoneChildren().isEmpty() && n.parent.upserts.isEmpty())
 
     def b = k.authed(zoneCount: 27)
     k.feed(b, "%03,1130010050\$")
@@ -166,7 +166,7 @@ k.section("Zone temperatures (command 07, spec 3.3)") {
 
     def s = k.authed(zoneCount: 27)
     k.feed(s, "%07,00000000003400007A00" + ("0" * 236) + "\$")
-    k.check("temperatures never create zone devices", s.parent.children.isEmpty() && s.parent.upserts.isEmpty())
+    k.check("temperatures never create zone devices", s.parent.zoneChildren().isEmpty() && s.parent.upserts.isEmpty())
 
     def z = k.authed(zoneSet: "9")
     k.feed(z, "%01," + ("0" * 32) + "\$")
@@ -197,7 +197,7 @@ k.section("Debug dump") {
     d.logs.clear()
     d.debugDump()
     String dump = d.logs.findAll { it.lvl == "info" }*.msg.join("\n")
-    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.3.1") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
+    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.4.0") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
     k.check("it shows the queue by name", dump.contains("in flight disarm") && dump.contains("1 queued (armStay)"), dump)
     k.check("and the recent events", dump.contains("Armed by user 2"), dump)
     k.check("it says whether secrets are set without showing them", dump.contains("password set") && dump.contains("master code set"), dump)

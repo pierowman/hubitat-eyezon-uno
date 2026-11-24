@@ -96,6 +96,7 @@ metadata {
         command "debugDump"
         command "poll"
         command "restStartupSync"
+        command "syncDevices"
     }
 
     preferences {
@@ -512,7 +513,7 @@ def clearCommandQueue() {
 }
 
 private String driverVersion() {
-    return "1.3.1"
+    return "1.4.0"
 }
 
 // ---- Health: children report online while the connection is authenticated ----
@@ -525,6 +526,13 @@ private void markHealth(String value) {
     if (state.health == value) return
     state.health = value
     sendEvent(name: "healthStatus", value: value)
+    children().each { dev ->
+        try {
+            dev.sendEvent(name: "healthStatus", value: value)
+        } catch (e) {
+            logDebug("Could not set the health of ${dev.deviceNetworkId}: ${e}")
+        }
+    }
     parent?.notifyHealth(value)
 }
 
@@ -581,7 +589,7 @@ private List<String> dumpConnectionLines() {
 private List<String> dumpSettingsLines() {
     return [
         "settings: ip ${settings.ip}, port ${safePort()}, password ${settings.password ? 'set' : 'NOT SET'}, master code ${settings.masterCode ? 'set' : 'not set'}, REST ${settings.useRestMetadata == true}, keepalive ${keepaliveSeconds()}s, watchdog ${settings.watchdogMinutes ?: '3'}m, command timeout ${commandTimeoutSeconds()}s",
-        "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'})",
+        "zones: ${configuredZones().size()} (${settings.zoneSet ? 'from zone set' : 'from zone count'}), devices: ${partitionChildren().size()} partition(s) and ${children().size() - partitionChildren().size()} zone(s) under this device",
         "options: panic ${settings.enablePanic == true}, require code to arm ${settings.requireCodeToArm == true}, diagnostic events ${settings.diagnosticEvents == true}, test events ${settings.recordTestEvents == true}, trace ${settings.traceLogging == true}, debug ${settings.debugLogging == true}"
     ]
 }
@@ -1232,7 +1240,7 @@ def restStartupSync() {
         if (partitionNum == 1) sendEvent(name: "alarmSystemStatus", value: mapped)
         state.partitionStatus = state.partitionStatus ?: [:]
         state.partitionStatus["${partitionNum}"] = mapped
-        parent?.notifyPartitionState(partitionNum, mapped)
+        sendPartitionState(partitionNum, mapped)
     }
 
     def zoneStatus = snapshot["zoneStatus"] instanceof List ? snapshot["zoneStatus"] : []
@@ -1398,7 +1406,7 @@ private void onCommandAccepted(Map inflight) {
         String chime = inflight.name == "chimeOn" ? "on" : "off"
         Integer chimePartition = safeInt(inflight.partition, 1)
         if (chimePartition == 1) sendEvent(name: "chime", value: chime)
-        parent?.notifyPartitionEvents(chimePartition, [[name: "chime", value: chime]])
+        sendPartitionEvents(chimePartition, [[name: "chime", value: chime]])
     } else if (inflight.pgm) {
         // No state comes back for a PGM, so the best we can say is when the panel last accepted a trigger.
         parent?.notifyPgmEvents(inflight.pgm as Integer, [[name: "lastTriggered", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone), isStateChange: true]])
@@ -1499,6 +1507,7 @@ private void publishZoneSummary() {
     if (changed) {
         changed.each { String name, def value -> sendEvent(name: name, value: value) }
         try {
+            forwardPartitionSummary(changed)
             parent?.notifyPanelSummary(changed)
         } catch (e) {
             logDebug("Failed to forward the zone summary: ${e}")
@@ -1560,7 +1569,7 @@ private String cachedZoneName(Integer zone) {
 
     String name = null
     try {
-        name = parent?.zoneName(zone)
+        name = zoneName(zone)
     } catch (ignored) {
     }
     NAME_CACHE.put(key, [name: name, at: t])
@@ -1596,7 +1605,7 @@ private void publishPartitionZones(Set<Integer> openSet) {
         }
         if (!events) return
         try {
-            parent?.notifyPartitionEvents(partition, events)
+            sendPartitionEvents(partition, events)
         } catch (e) {
             logDebug("Failed to forward the zone lists to partition ${partition}: ${e}")
         }
@@ -1673,7 +1682,7 @@ private String requestedArmMode(Integer partition) {
 private void publishArmingMode(Integer partition, String status) {
     String mode = status == "exitDelay" ? requestedArmMode(partition) : "none"
     try {
-        parent?.notifyPartitionEvents(partition, [[name: "armingMode", value: mode]])
+        sendPartitionEvents(partition, [[name: "armingMode", value: mode]])
     } catch (e) {
         logDebug("Failed to forward the arming mode to partition ${partition}: ${e}")
     }
@@ -1709,7 +1718,7 @@ private void handlePartitionFrame(List<String> parts) {
             logInfo("Partition ${partition} status -> ${status}")
         }
 
-        parent?.notifyPartitionState(partition, status)
+        sendPartitionState(partition, status)
     }
 }
 
@@ -1784,7 +1793,7 @@ private void routeCidZoneEvent(String eventCode, Integer zone, boolean isEvent, 
     if (!FAST_PATH_ZONE_CODES.contains(eventCode)) return
     if (!(isEvent || isRestore)) return
 
-    parent?.upsertDiscoveredZone(zone, suggestTypeFromCid(eventCode), null)
+    ensureZoneFor(zone, suggestTypeFromCid(eventCode))
 
     boolean active = isEvent && !isRestore
 
@@ -1928,7 +1937,7 @@ private String userLabel(Integer user) {
 private String zoneLabel(Integer zone) {
     String name = null
     try {
-        name = parent?.zoneName(zone)
+        name = zoneName(zone)
     } catch (ignored) {
     }
     return name ? "${name} (zone ${zone})" : "zone ${zone}"
@@ -2020,7 +2029,7 @@ private void publishCidEvent(String qualifier, String code, Integer partition, I
 
     if (previous || partition < 1 || partition > 8) return
 
-    parent?.notifyPartitionEvents(partition, partitionEventsFor(qualifier, code, zoneOrUser, d, at))
+    sendPartitionEvents(partition, partitionEventsFor(qualifier, code, zoneOrUser, d, at))
 }
 
 // Each field is its own attribute so a rule can test the code, zone or user directly. They are set first and
@@ -2120,7 +2129,7 @@ private void handleBypassBitmap(List<String> parts) {
 
 // Conditions only update existing zone devices; they never create new ones.
 private void routeZoneCondition(Integer zone, Map condition, boolean present) {
-    def child = findZoneChild("uno-zone-${zone}")
+    def child = getChildDevice("uno-zone-${zone}")
     if (!child) return
 
     String value = present ? condition.on : condition.off
@@ -2139,7 +2148,7 @@ private void routeZoneCondition(Integer zone, Map condition, boolean present) {
 
 // Bypass changes only update existing zone devices; they never create new ones.
 private void routeBypassUpdate(Integer zone, boolean bypassed) {
-    def child = findZoneChild("uno-zone-${zone}")
+    def child = getChildDevice("uno-zone-${zone}")
     if (!child) return
 
     try {
@@ -2277,7 +2286,7 @@ private void handleTroubleBitmap(List<String> parts) {
             logInfo("Partition ${partition} trouble: ${attrs.troubleDetail}")
         }
 
-        parent?.notifyPartitionEvents(partition, attrs.collect { String name, String value -> [name: name, value: value] })
+        sendPartitionEvents(partition, attrs.collect { String name, String value -> [name: name, value: value] })
     }
 
     if (anyChange) {
@@ -2285,6 +2294,7 @@ private void handleTroubleBitmap(List<String> parts) {
         if (device.currentValue("troubleSummary") != summary) {
             sendEvent(name: "troubleSummary", value: summary)
             try {
+                forwardPartitionSummary([troubleSummary: summary])
                 parent?.notifyPanelSummary([troubleSummary: summary])
             } catch (e) {
                 logDebug("Failed to forward the trouble summary: ${e}")
@@ -2344,7 +2354,7 @@ private void handleZoneTemperatures(List<String> parts) {
         if (byteHex == "00" || byteHex == TEMP_SEEN.get(seenKey)) continue
         TEMP_SEEN.put(seenKey, byteHex)
 
-        def child = findZoneChild("uno-zone-${zone}")
+        def child = getChildDevice("uno-zone-${zone}")
         if (!child) continue
         try {
             child.sendEvent(temperatureEvent("temperature", envisacorToCelsius(byteHex)))
@@ -2377,7 +2387,7 @@ private void handlePartitionTemperatures(List<String> parts) {
             events << temperatureEvent(t.attr as String, envisacorToCelsius(byteHex))
         }
 
-        if (events) parent?.notifyPartitionEvents(partition, events)
+        if (events) sendPartitionEvents(partition, events)
     }
 }
 
@@ -2426,7 +2436,7 @@ private void publishKeypadSound(Integer partition, String text) {
     if (settings.diagnosticEvents != true) return
 
     sendEvent(name: "lastKeypadSound", value: text, isStateChange: true)
-    parent?.notifyPartitionEvents(partition, [[name: "lastKeypadSound", value: text, isStateChange: true]])
+    sendPartitionEvents(partition, [[name: "lastKeypadSound", value: text, isStateChange: true]])
 }
 
 // %FF: 128 little-endian 16 bit zone timers (512 hex characters). A timer counts down from FFFF (open) in
@@ -2470,7 +2480,7 @@ private void handleChime(List<String> parts) {
         Integer partition = idx + 1
         String value = "type ${type}"
         if (partition == 1) sendEvent(name: "lastChime", value: value, isStateChange: true)
-        parent?.notifyPartitionEvents(partition, [[name: "lastChime", value: value, isStateChange: true]])
+        sendPartitionEvents(partition, [[name: "lastChime", value: value, isStateChange: true]])
     }
 }
 
@@ -2491,36 +2501,19 @@ private void emitZoneFastEvent(Integer zoneNum, boolean active) {
 private void routeZoneUpdate(Integer zoneNum, boolean active) {
     String dni = "uno-zone-${zoneNum}"
 
-    def child = findZoneChild(dni)
+    def child = getChildDevice(dni)
 
     if (!child) {
-        parent?.upsertDiscoveredZone(zoneNum, null, null)
-        child = findZoneChild(dni)
+        ensureZoneFor(zoneNum, null)
+        child = getChildDevice(dni)
     }
 
     if (!child) {
-        logWarn("Zone ${zoneNum} device not found via parent app: ${dni}")
+        logWarn("Zone ${zoneNum} device not found: ${dni}")
         return
     }
 
     updateZoneChild(child, zoneNum, active)
-}
-
-private findZoneChild(String dni) {
-    def child = null
-    try {
-        child = parent?.getChildDevice(dni)
-    } catch (ignored) {
-    }
-
-    if (!child) {
-        try {
-            child = parent?.getChildDevices()?.find { it.deviceNetworkId == dni }
-        } catch (ignored) {
-        }
-    }
-
-    return child
 }
 
 // The zone driver knows its own capability, so one call replaces a capability check and an event per type.
@@ -2529,6 +2522,382 @@ private void updateZoneChild(child, Integer zoneNum, boolean active) {
         child.applyZoneState(active)
     } catch (e) {
         logWarn("Zone ${zoneNum} did not accept the update; update all UNO zone drivers to the same version: ${e}")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Child devices. The partitions and the zones are children of this device, so the Devices page lists them under it.
+// The app owns the settings (names, hints, the UNO's own names, the prefix) and says what each device should be called
+// and what type each zone is. This device creates and names them, and sends them their updates.
+// ---------------------------------------------------------------------------------------------
+
+private List children() {
+    try {
+        return getChildDevices() ?: []
+    } catch (ignored) {
+        return []
+    }
+}
+
+private List partitionChildren() {
+    return children().findAll { dev -> (dev.deviceNetworkId ?: "").startsWith("uno-partition-") }
+}
+
+private Integer zoneNumberOf(String dni) {
+    if (!dni || !dni.startsWith("uno-zone-")) return null
+    return safeParseInt(dni.substring("uno-zone-".length()), 0) ?: null
+}
+
+// What the app says the devices should be: the prefix, the partitions (number -> name), whether to pre-create the
+// configured zones, and the default zone type.
+private Map devicePlan() {
+    try {
+        return parent?.devicePlan() as Map
+    } catch (e) {
+        logWarn("Could not get the device plan from the app: ${e}")
+        return null
+    }
+}
+
+// What the app knows about one zone: the name chosen for it, the name the UNO has for it, and the type chosen. Null when
+// the app can't be asked, which must never be mistaken for "nothing is configured".
+private Map zoneSpec(Integer zone) {
+    try {
+        return parent?.zoneSpec(zone) as Map
+    } catch (ignored) {
+        return null
+    }
+}
+
+// Creates the devices that are missing and brings the others up to date (names, prefix, zone types). The app calls
+// this after it has saved, and the button on this device does the same.
+def syncDevices() {
+    Map plan = devicePlan()
+    if (plan == null) return
+
+    String prefix = (plan.prefix ?: "").toString()
+    boolean changed = false
+    Map partitions = (plan.partitions ?: [:]) as Map
+    partitions.each { def number, def base ->
+        changed = ensurePartitionDevice(number as Integer, base.toString(), prefix) || changed
+    }
+    // Remembered because a partition taken out of the set keeps its device, which must not count as a second one.
+    state.plannedPartitions = partitions.keySet().collect { it as Integer }.sort()
+
+    Set<Integer> zones = new TreeSet<Integer>()
+    if (plan.autoCreate != false) zones.addAll(configuredZones())
+    children().each { dev ->
+        Integer existing = zoneNumberOf(dev.deviceNetworkId)
+        if (existing) zones.add(existing)
+    }
+    zones.each { Integer zone -> changed = ensureZoneDevice(zone, null, plan, prefix) || changed }
+
+    state.appliedPrefix = prefix
+    copySummaryToSinglePartition()
+    // New devices know nothing yet, so have the panel announce everything again.
+    if (changed) runIn(1, "resyncStates")
+}
+
+private boolean ensurePartitionDevice(Integer partition, String base, String prefix) {
+    String dni = "uno-partition-${partition}"
+    String label = prefixedLabel(base, prefix)
+    def existing = getChildDevice(dni)
+
+    if (existing) {
+        try {
+            if (existing.label != label) {
+                existing.setLabel(label)
+                logInfo("Updated partition ${partition} label to ${label}")
+            }
+        } catch (e) {
+            logWarn("Unable to update the label of partition ${partition}: ${e}")
+        }
+        return false
+    }
+
+    try {
+        applyHealth(addChildDevice("uno", "UNO Partition", dni, [name: base, label: label, isComponent: true]))
+        logInfo("Created partition device: ${label}")
+        return true
+    } catch (e) {
+        logWarn("Could not create partition ${partition} (is the 'UNO Partition' driver installed?): ${e}")
+        return false
+    }
+}
+
+// A zone event can arrive before the zone has a device, and can say what kind of sensor it is (smoke, water, CO).
+private void ensureZoneFor(Integer zone, String suggestedType) {
+    if (!suggestedType && getChildDevice("uno-zone-${zone}")) return
+    ensureZoneDevice(zone, suggestedType, devicePlan() ?: [:], (state.appliedPrefix ?: "").toString())
+}
+
+// Creates a zone's device, or renames it and changes its driver to match what the app says. True if a device was made.
+private boolean ensureZoneDevice(Integer zoneNum, String suggestedType, Map plan, String prefix) {
+    if (zoneNum == null || zoneNum <= 0) return false
+
+    Map spec = zoneSpec(zoneNum)
+    def existing = getChildDevice("uno-zone-${zoneNum}")
+    // Without the app's answer a device that exists is left exactly as it is (a guess could change its type or name);
+    // a zone that has no device yet is still made, so its updates aren't lost.
+    if (spec == null && existing) return false
+    spec = spec ?: [:]
+
+    String chosenLabel = spec.label
+    String hintedType = spec.type
+    String nameForInference = chosenLabel ?: spec.panel
+    String defaultType = (plan.defaultZoneType ?: "contact").toString()
+
+    String label = prefixedLabel(zoneBaseLabel(zoneNum, chosenLabel, spec.panel as String, spec.legacy as String, existing, prefix), prefix)
+
+    if (!existing) {
+        String driver = driverNameForType(canonicalType(hintedType ?: suggestedType ?: inferTypeFromName(nameForInference) ?: defaultType))
+        boolean created = addZoneDevice(zoneNum, driver, label)
+        if (created) logDebug("Created zone ${zoneNum}: ${label} (${driver})")
+        return created
+    }
+
+    String currentDriver = deviceTypeName(existing)
+    String desired = desiredDriverForExisting(currentDriver, hintedType, suggestedType, nameForInference, defaultType)
+    if (currentDriver && currentDriver != desired) return recreateZone(zoneNum, desired, label)
+
+    relabelZone(existing, zoneNum, label)
+    return false
+}
+
+private boolean addZoneDevice(Integer zoneNum, String driver, String label) {
+    try {
+        applyHealth(addChildDevice("uno", driver, "uno-zone-${zoneNum}", [name: "UNO Zone ${zoneNum}", label: label, isComponent: true]))
+        return true
+    } catch (e) {
+        logWarn("Could not create zone ${zoneNum} (is the '${driver}' driver installed?): ${e}")
+        return false
+    }
+}
+
+private boolean recreateZone(Integer zoneNum, String driver, String label) {
+    try {
+        deleteChildDevice("uno-zone-${zoneNum}")
+    } catch (e) {
+        logWarn("Could not recreate zone ${zoneNum}; the device is in use: ${e}")
+        return false
+    }
+
+    boolean created = addZoneDevice(zoneNum, driver, label)
+    if (created) logInfo("Recreated zone ${zoneNum}: ${label} (${driver})")
+    return created
+}
+
+private void relabelZone(def zoneDevice, Integer zoneNum, String label) {
+    try {
+        if (zoneDevice.label != label) {
+            zoneDevice.setLabel(label)
+            logDebug("Updated zone ${zoneNum} label to ${label}")
+        }
+    } catch (e) {
+        logWarn("Unable to relabel zone ${zoneNum}: ${e}")
+    }
+}
+
+// A device made after the connection came up still needs to know whether the panel is reachable.
+private void applyHealth(def dev) {
+    try {
+        dev?.sendEvent(name: "healthStatus", value: state.health ?: "offline")
+    } catch (ignored) {
+    }
+}
+
+private String deviceTypeName(def dev) {
+    try {
+        return dev.getTypeName()
+    } catch (ignored) {
+        try {
+            return dev.typeName
+        } catch (ignored2) {
+            return null
+        }
+    }
+}
+
+// ---- Names and prefix ----
+
+// The label a device gets: the prefix, a space, then its own name. Hubitat doesn't document a limit for a device
+// label; its app labels stop at 255 characters, so that is used here.
+private String prefixedLabel(String base, String prefix) {
+    String label = prefix ? "${prefix} ${base}".toString() : base
+    if (label.length() > 255) {
+        logWarn("Device name cut to 255 characters: ${label.take(60)}...")
+        return label.take(255)
+    }
+    return label
+}
+
+// A label with the prefix removed that this device put on it: the one in force before this sync, or the current one
+// (a device made earlier in the same sync already carries it). Putting the prefix back gives the same label.
+private String unprefixedLabel(String label, String prefix = "") {
+    if (!label) return label
+    for (String candidate : [(state.appliedPrefix ?: "").toString(), prefix ?: ""]) {
+        if (candidate && label.startsWith(candidate + " ")) return label.substring(candidate.length() + 1)
+    }
+    return label
+}
+
+// The name for a zone, without the prefix. A name chosen in the app always applies. The UNO's name replaces the label
+// only while that is still the default or what was set last time, so a name changed on the Devices page is kept. A zone
+// with no device yet takes the label its old device had (from before the devices moved under this one), if there was one.
+private String zoneBaseLabel(Integer zoneNum, String chosen, String fromPanel, String legacy, def existing, String prefix) {
+    String key = "${zoneNum}".toString()
+    Map applied = (state.appliedLabels instanceof Map) ? state.appliedLabels : [:]
+    String current = existing ? unprefixedLabel(existing.label, prefix) : legacy
+    boolean untouched = !current || current == "Zone ${zoneNum}" || current == applied[key]
+
+    String base = chosen ?: ((fromPanel && untouched) ? fromPanel : (current ?: "Zone ${zoneNum}"))
+
+    // Only a name set from the app or the UNO is remembered; a hand-made one must never look like ours.
+    if ((base == chosen || base == fromPanel) && applied[key] != base) {
+        Map updated = new LinkedHashMap(applied)
+        updated[key] = base
+        state.appliedLabels = updated
+    }
+    return base
+}
+
+// A zone's own name, without the prefix. A zone that still has its default name has no real name to show.
+private String zoneName(Integer zone) {
+    String label = unprefixedLabel(getChildDevice("uno-zone-${zone}")?.label)
+    return (label && label != "Zone ${zone}") ? label : null
+}
+
+// ---- Zone types ----
+
+private String driverNameForType(String zoneType) {
+    switch ((zoneType ?: "contact").toLowerCase()) {
+        case "motion":
+            return "UNO Zone Motion"
+        case "smoke":
+            return "UNO Zone Smoke"
+        case "co":
+            return "UNO Zone CO"
+        case "water":
+            return "UNO Zone Water"
+        default:
+            return "UNO Zone Contact"
+    }
+}
+
+private String canonicalType(String raw) {
+    String t = (raw ?: "contact").toLowerCase().trim()
+
+    switch (t) {
+        case "pir":
+        case "interior":
+            return "motion"
+        case "fire":
+        case "heat":
+            return "smoke"
+        case "carbonmonoxide":
+        case "carbon_monoxide":
+            return "co"
+        case "leak":
+        case "flood":
+            return "water"
+        default:
+            return t
+    }
+}
+
+private String inferTypeFromName(String name) {
+    String n = (name ?: "").toLowerCase()
+
+    // Match at word starts so "Courtyard" isn't CO and "Wheat" isn't heat.
+    if (n =~ /\b(pir|motion)/) return "motion"
+    if (n =~ /\b(smoke|heat)/) return "smoke"
+    if (n.contains("carbon monoxide") || n =~ /\bco\b/) return "co"
+    if (n =~ /\b(water|leak|flood|hvac)/) return "water"
+    if (n =~ /\b(door|window|gate|patio)/) return "contact"
+
+    return null
+}
+
+// A type chosen in the app always wins. Otherwise a device still on the default driver may be upgraded from an event
+// or its name; a device already on a specific driver is left alone to avoid flip-flopping.
+private String desiredDriverForExisting(String currentDriver, String hintedType, String suggestedType, String nameForInference, String defaultType) {
+    if (hintedType) return driverNameForType(canonicalType(hintedType))
+
+    String defaultDriver = driverNameForType(canonicalType(defaultType))
+    if (currentDriver && currentDriver != defaultDriver) return currentDriver
+
+    String learned = suggestedType ?: inferTypeFromName(nameForInference)
+    return learned ? driverNameForType(canonicalType(learned)) : currentDriver
+}
+
+// ---- Updates for the partitions ----
+
+private void sendPartitionState(Integer partition, String status) {
+    try {
+        getChildDevice("uno-partition-${partition}")?.setAlarmState(status)
+    } catch (e) {
+        logDebug("Failed to update partition ${partition}: ${e}")
+    }
+}
+
+// Partitions without a device (not in the partition set) are ignored.
+private void sendPartitionEvents(Integer partition, List events) {
+    def dev = getChildDevice("uno-partition-${partition}")
+    if (!dev) return
+    events?.each { Map e -> dev.sendEvent(e) }
+}
+
+// With one partition and no zones assigned to partitions, that partition's device shows the open and bypassed zones
+// too. (The UNO doesn't say which partition a zone is in, so with several they stay on this device.)
+private List singlePartitionTarget() {
+    List<Integer> planned = (state.plannedPartitions instanceof List) ? (state.plannedPartitions as List<Integer>) : null
+    List partitions = planned != null ? planned.collect { Integer p -> getChildDevice("uno-partition-${p}") }.findAll { it } : partitionChildren()
+    boolean single = (planned != null ? planned.size() : partitions.size()) == 1
+    return (single && partitions.size() == 1 && partitionZoneMap().isEmpty()) ? partitions : []
+}
+
+private void forwardPartitionSummary(Map changed) {
+    List target = singlePartitionTarget()
+    if (!target) return
+    changed.findAll { String n, def v -> n in ["openZones", "bypassedZones"] }.each { String n, def v -> target[0].sendEvent(name: n, value: v) }
+}
+
+private void copySummaryToSinglePartition() {
+    List target = singlePartitionTarget()
+    if (!target) return
+    ["openZones", "bypassedZones"].each { String n ->
+        def v = device.currentValue(n)
+        if (v != null) target[0].sendEvent(name: n, value: v)
+    }
+}
+
+// ---- Stale sensors ----
+
+// The app asks once a day, and is told which zones have had no activity in that many days. A zone that has never
+// triggered counts only once the check itself has been running that long ("since"), because there is no way to know how
+// old its sensor is.
+def checkStaleSensors(Integer days, Long since) {
+    long cutoff = now() - days * 86400000L
+    List<String> stale = []
+    children().each { dev ->
+        Integer zone = zoneNumberOf(dev.deviceNetworkId)
+        if (!zone) return
+
+        Long last = parseFaultTime(dev.currentValue("lastFault"))
+        boolean isStale = (last != null) ? last < cutoff : (since ?: now()) < cutoff
+        if (isStale) stale << (zoneName(zone) ?: "Zone ${zone}").toString()
+    }
+    parent?.staleSensorResult(days, stale.sort())
+}
+
+private Long parseFaultTime(def text) {
+    if (!text) return null
+    try {
+        def fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+        fmt.setTimeZone(location.timeZone)
+        return fmt.parse(text.toString()).time
+    } catch (ignored) {
+        return null
     }
 }
 

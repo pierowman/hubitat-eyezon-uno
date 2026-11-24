@@ -93,7 +93,7 @@ k.section("Low battery, lost supervision and tamper are zone conditions") {
 
     def n = k.authed()
     k.feed(n, "%03,1384010050\$")
-    k.check("a condition never creates a zone device", n.parent.children.isEmpty() && n.parent.upserts.isEmpty())
+    k.check("a condition never creates a zone device", n.parent.zoneChildren().isEmpty() && n.parent.upserts.isEmpty())
 }
 
 k.section("Last alarm") {

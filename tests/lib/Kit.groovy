@@ -59,6 +59,7 @@ class Kit {
         d.settings.putAll([ip: "1.2.3.4", port: 4025, password: "pw", zoneCount: 27, useRestMetadata: false,
                            heartbeatMinutes: "1", watchdogMinutes: "3", debugLogging: true] + over)
         d.parent = new MockApp()
+        d.parent.host.wire(d)
         return d
     }
 
@@ -101,5 +102,29 @@ class Kit {
                            useRestMetadata: false, autoCreateConfiguredZones: true, defaultUnknownZoneType: "contact"] + settings)
         if (restMeta != null) { a.httpGetImpl = { Map p -> [status: 200, data: restMeta] } }
         return [a, env]
+    }
+
+    // The real app and the real connection driver working together, with the partitions and zones the driver creates
+    // under it. Returns [app, conn, appEnv]: appEnv holds the app's own children (PGM, status); conn.children is the
+    // driver's (partitions and zones). `save()` does what the hub does after Done: the app initializes, then the timer
+    // that tells the connection device to sync its devices fires.
+    List newPair(Map settings, Map restMeta = null) {
+        def (a, env) = newApp(settings, restMeta)
+        HubBase conn = load("drivers/UNOConnectionDriver.groovy")
+        conn.parent = a
+        ChildHost host = new ChildHost()
+        host.wire(conn)
+        ConnAdapter adapter = new ConnAdapter(script: conn)
+        env.children["uno-connection"] = adapter
+        a.metaClass.addChildDevice = { String ns, String type, String dni, Map props ->
+            if (dni == "uno-connection") { adapter.label = props.label; env.created << [dni, type]; return adapter }
+            env.created << [dni, type]
+            def c = new MockChild(dni: dni, typeName: type, label: props.label, name: props.name)
+            env.children[dni] = c
+            return c
+        }
+        conn.metaClass.save = { -> a.initialize(); a.syncConnectionDevices() }
+        conn.metaClass.host = host
+        return [a, conn, env]
     }
 }

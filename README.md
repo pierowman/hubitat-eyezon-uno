@@ -77,13 +77,15 @@ See [INSTALL.md](INSTALL.md). In short: install the drivers, install the app, ad
 
 | Device | Driver | When |
 |---|---|---|
-| `UNO Connection` | UNO Connection | Always (one per app). Owns the socket, queue and panel-wide diagnostics |
-| One per partition (`uno-partition-N`) | UNO Partition | For each partition in **Partitions to create** (partition 1 by default) |
-| One per zone (`uno-zone-N`) | UNO Zone Contact / Motion / Smoke / CO / Water | For each zone in the zone set (or 1..Zone Count) |
+| `UNO Connection` | UNO Connection | Always (one per app). Owns the socket, queue and panel-wide diagnostics, and the partition and zone devices below it |
+| One per partition (`uno-partition-N`) | UNO Partition | For each partition in **Partitions to create** (partition 1 by default). A child of `UNO Connection` |
+| One per zone (`uno-zone-N`) | UNO Zone Contact / Motion / Smoke / CO / Water | For each zone in the zone set (or 1..Zone Count). A child of `UNO Connection` |
 | One per PGM (`uno-pgm-N`) | UNO PGM | For each output in **PGM outputs to create** (none by default). The driver is optional in HPM |
 | `uno-status` | UNO Status | When **Create a UNO Status device** is on. The driver is optional in HPM |
 
-Device network IDs are fixed, so existing rules and dashboards keep working across upgrades. Only one UNO per hub is supported.
+The partitions and zones are children of the `UNO Connection` device, so Hubitat's Devices page lists them indented under it (and the arrow beside it collapses them). The connection device creates and names them from what the app says; the **Sync devices** command on it does the same on demand. The PGM and status devices are children of the app.
+
+Device network IDs are fixed (`uno-zone-N`, `uno-partition-N`), so they stay the same from one release to the next. The one exception was 1.4.0, which moved the partitions and zones under the connection device and so made them new devices (see [INSTALL.md](INSTALL.md)). Only one UNO per hub is supported.
 
 Zone names from the UNO's REST interface are the ones stored on the panel, which keeps only 16 characters of each. Type your own under **Zone names and types** for longer ones. A zone you rename on the Devices page keeps that name when you save the app; the UNO's name only replaces a label that is still the default or the one the app set. A name typed in the app always applies.
 
@@ -102,10 +104,10 @@ Zone names from the UNO's REST interface are the ones stored on the panel, which
 | Zone set | e.g. `1-8,12,20-27`. When filled in it **replaces** Zone Count |
 | Keep a bypassed zone in the open list | Off by default. See [Open zones](#open-zones) |
 | Default type for unknown zones | Used when a zone has no hint and its label doesn't suggest a type |
-| Zone names and types | Under **Zone names and types** (collapsed), one name and one type for each zone in the zone set. The UNO's own name for the zone is shown under each. Leave a name blank to use the UNO's, or type your own. Press **Load zone names from the UNO** to fetch the names now, so you can see and change them before pressing Done. A name or type chosen here wins over Zone Hints |
+| Zone names and types | Under **Zone names and types** (collapsed), one name and one type for each zone in the zone set. Each name box is pre-filled with the UNO's own name for the zone, which you can edit. Press **Load zone names from the UNO** to fetch the names now, so you can see and change them before pressing Done. A name or type chosen here wins over Zone Hints |
 | Zone Hints | One zone per line: `zoneNumber:Label:type` (`contact`, `motion`, `smoke`, `co`, `water`) |
 | User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
-| Device name prefix | Optional text put in front of every device label (`Alarm` gives `Alarm Front Door`), so the devices sort together on the Devices page. A prefix longer than 50 characters is cut, and a whole label is cut at 255. A device you renamed by hand keeps its own name, with the prefix in front. Names in events and notifications don't include the prefix |
+| Device name prefix | Optional text put in front of every partition and zone label (`Alarm` gives `Alarm Front Door`), so they sort together on the Devices page. The connection, PGM and status devices keep their plain names. A prefix longer than 50 characters is cut, and a whole label is cut at 255. A zone you renamed by hand keeps its own name, with the prefix in front. Names in events and notifications don't include the prefix |
 | Allow panic commands | Off by default. See [Panic commands](#panic-commands) |
 | PGM outputs to create / PGM names | e.g. `1,3-4` and `1:Garage Door`. See [PGM outputs](#pgm-outputs) |
 | Notifications | Devices to notify, and whether to send alarms (on by default), troubles (on by default) and arm/disarm (off by default). Also quiet hours, a partition filter and the connection-lost alert. See [Notifications](#notifications) |
@@ -144,6 +146,7 @@ Zone types are chosen in this order: your hint, a CID event type (smoke, water, 
 | Connection | `disarm`, `refreshAll`, `poll`, `reconnect`, `restStartupSync`, `clearCommandQueue`, `clearEventHistory` | Maintenance and manual control |
 | Connection | `dumpZoneTimers` | Asks the UNO for its zone timers and publishes them as `zoneTimers` (see [Attributes](#attributes)) |
 | Connection | `debugDump` | Logs a redacted snapshot (settings, connection, queue, partitions, recent events) for support. Passwords and codes are never included |
+| Connection | `syncDevices` | Creates the partition and zone devices that are missing and updates the names, prefix and zone types of the rest from the app's settings. The app calls this after **Done**; use it if devices are missing or out of date |
 
 > **Warning:** the partition device uses Hubitat's `Alarm` capability, and its `off` command **disarms** the partition. Anything that turns the "alarm" off (a rule, a dashboard tile, a voice assistant) will disarm your system. `siren`, `strobe` and `both` do nothing.
 

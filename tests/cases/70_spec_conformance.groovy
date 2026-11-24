@@ -25,7 +25,7 @@ k.section("Spec examples: CID event, chime and other frames") {
     def d = k.authed()
     k.feed(d, "%03,3441010020\$")
     k.check("CID 3441010020: restoral, code 441, partition 1, user 2", d.lastAttr("lastCidEvent") == "CID q=3 code=441 partition=1 zoneOrUser=2", d.lastAttr("lastCidEvent"))
-    k.check("a user-number CID never becomes a zone", d.parent.children.isEmpty())
+    k.check("a user-number CID never becomes a zone", d.parent.zoneChildren().isEmpty())
 
     k.feed(d, "%10,01000005\$")
     k.check("%10,01000005: partition 2 chime type 1 and partition 8 type 5", d.parent.partitionAttr(2, "lastChime") == "type 1" && d.parent.partitionAttr(8, "lastChime") == "type 5")

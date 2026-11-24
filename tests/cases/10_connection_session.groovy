@@ -127,7 +127,7 @@ k.section("Frame handling robustness") {
 
     def e = k.authed(zoneCount: 8)
     e.parent.failPartitionNotify = true
-    k.feed(e, "%02,0100000000000000\$\r\n%01,0100000000000000\$\r\n")
+    k.feed(e, "%06,0000000000000000\$\r\n%01,0100000000000000\$\r\n")
     k.check("a handler exception is logged with the frame", e.warns().any { it.contains("Error handling frame") }, e.warns())
     k.check("later frames in the same packet are still processed", e.parent.children["uno-zone-1"]?.last("contact") == "open")
 }
