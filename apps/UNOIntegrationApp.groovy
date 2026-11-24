@@ -58,6 +58,15 @@ def mainPage() {
                 required: false
         }
 
+        section("Device names (optional)") {
+            input "devicePrefix", "text",
+                title: "Device name prefix",
+                description: "Put in front of the name of every device this app creates, so they sort together on the Devices page, for example 'Alarm' gives 'Alarm Front Door'. Leave empty for none. Longer than ${maxPrefix()} characters is cut, and a whole name is cut at ${maxLabel()}.",
+                submitOnChange: true,
+                required: false
+            paragraph "Example: ${prefixedLabel('Front Door')}. The UNO itself keeps only 16 characters of each zone name, so use the zone names below for longer ones."
+        }
+
         section("REST Metadata / Startup Sync") {
             input "useRestMetadata", "bool",
                 title: "Enable REST metadata and startup sync",
@@ -89,6 +98,24 @@ def mainPage() {
                 ],
                 defaultValue: "contact",
                 required: true
+        }
+
+        section("Zone names and types (optional)", hideable: true, hidden: true) {
+            paragraph "The names the UNO has stored for your zones are shown under each zone. Leave a name blank to use that one, or type your own (the UNO keeps only 16 characters of each name). A name or type chosen here wins over Zone Hints. Press Done to apply."
+            input "loadZoneNames", "button", title: "Load zone names from the UNO"
+            paragraph zoneNamesStatus()
+            configuredZones().each { Integer z ->
+                String panelName = state.restZoneLabels ? state.restZoneLabels["${z}"] : null
+                input "zoneName_${z}", "text",
+                    title: "Zone ${z} name",
+                    description: panelName ? "UNO name: ${panelName}" : "No name stored on the UNO",
+                    required: false
+                input "zoneType_${z}", "enum",
+                    title: "Zone ${z} type",
+                    options: ["auto": "Automatic (from the name)", "contact": "Contact", "motion": "Motion", "smoke": "Smoke", "co": "CO", "water": "Water"],
+                    defaultValue: "auto",
+                    required: false
+            }
         }
 
         section("Zone Hints (optional fallback / override)") {
@@ -257,6 +284,7 @@ def initialize() {
         // New devices (and new zone assignments, or a changed open-list rule) start knowing nothing, so have the panel announce everything again.
         runIn(1, "resyncConnection")
     }
+    state.appliedPrefix = devicePrefix()
     state.deviceChurn = 0
 }
 
@@ -295,13 +323,59 @@ private void ensureConnectionDevice() {
             dni,
             [
                 name       : "UNO Connection",
-                label      : "UNO Connection",
+                label      : prefixedLabel("UNO Connection"),
                 isComponent: false
             ]
         )
         logInfo("Created UNO Connection device")
         // A new device has none of the settings that were pushed to the old one.
         state.pushedSettings = [:]
+    } else {
+        relabelDefault(dev, "UNO Connection")
+    }
+}
+
+// ---- Device label prefix ----
+
+private Integer maxPrefix() { return 50 }
+
+// Hubitat doesn't document a limit for a device label; its app labels stop at 255 characters, so that is used here.
+private Integer maxLabel() { return 255 }
+
+private String devicePrefix() {
+    return (settings.devicePrefix ?: "").toString().trim().take(maxPrefix())
+}
+
+// The label a device gets: the prefix, a space, then its own name.
+private String prefixedLabel(String base) {
+    String prefix = devicePrefix()
+    String label = prefix ? "${prefix} ${base}".toString() : base
+    if (label.length() > maxLabel()) {
+        log.warn "Device name cut to ${maxLabel()} characters: ${label.take(60)}..."
+        return label.take(maxLabel())
+    }
+    return label
+}
+
+// A label with the prefix removed that this app put on it: the one in force before this save, or the current one
+// (a device made earlier in the same save already carries it). Putting the prefix back gives the same label.
+private String unprefixedLabel(String label) {
+    if (!label) return label
+    for (String prefix : [(state.appliedPrefix ?: "").toString(), devicePrefix()]) {
+        if (prefix && label.startsWith(prefix + " ")) return label.substring(prefix.length() + 1)
+    }
+    return label
+}
+
+// A device that still has its default name follows the prefix; one that has been renamed by hand is left alone.
+private void relabelDefault(def dev, String base) {
+    if (unprefixedLabel(dev.label ?: base) != base) return
+
+    String label = prefixedLabel(base)
+    try {
+        if (dev.label != label) dev.setLabel(label)
+    } catch (e) {
+        log.warn "Unable to relabel ${base}: ${e}"
     }
 }
 
@@ -313,7 +387,8 @@ private void ensurePartitionDevices() {
 
 private void ensurePartitionDevice(Integer partition) {
     String dni = "uno-partition-${partition}"
-    String label = partitionLabelFor(partition)
+    String base = partitionLabelFor(partition)
+    String label = prefixedLabel(base)
 
     def dev = getChildDevice(dni)
 
@@ -323,7 +398,7 @@ private void ensurePartitionDevice(Integer partition) {
             "UNO Partition",
             dni,
             [
-                name       : label,
+                name       : base,
                 label      : label,
                 isComponent: true
             ]
@@ -349,11 +424,12 @@ private void ensurePgmDevices() {
     Map names = (state.pgmNamesMap instanceof Map) ? state.pgmNamesMap : [:]
     parseRange(settings.pgmSet, 1, 14).values.each { Integer pgm ->
         String dni = "uno-pgm-${pgm}"
-        String label = names["${pgm}"]?.toString()?.trim() ?: "PGM ${pgm}"
+        String base = names["${pgm}"]?.toString()?.trim() ?: "PGM ${pgm}"
+        String label = prefixedLabel(base)
         def dev = getChildDevice(dni)
 
         if (!dev) {
-            def created = addChildDevice("uno", "UNO PGM", dni, [name: label, label: label, isComponent: true])
+            def created = addChildDevice("uno", "UNO PGM", dni, [name: base, label: label, isComponent: true])
             applyHealth(created)
             noteDeviceCreated()
             logInfo("Created PGM device: ${label}")
@@ -560,9 +636,15 @@ private boolean isRepeatNotice(String message, boolean restore) {
 // ---- Status device, panel summary and stale sensors ----
 
 private void ensureStatusDevice() {
-    if (settings.createStatusDevice != true || getChildDevice("uno-status")) return
+    if (settings.createStatusDevice != true) return
+
+    def existing = getChildDevice("uno-status")
+    if (existing) {
+        relabelDefault(existing, "UNO Status")
+        return
+    }
     try {
-        def created = addChildDevice("uno", "UNO Status", "uno-status", [name: "UNO Status", label: "UNO Status", isComponent: true])
+        def created = addChildDevice("uno", "UNO Status", "uno-status", [name: "UNO Status", label: prefixedLabel("UNO Status"), isComponent: true])
         applyHealth(created)
         applyPanelSummary(created)
         noteDeviceCreated()
@@ -711,7 +793,8 @@ def userName(Integer user) {
 }
 
 def zoneName(Integer zone) {
-    String label = getChildDevice("uno-zone-${zone}")?.label
+    // The prefix is for the Devices page; names in events and notifications are the zone's own.
+    String label = unprefixedLabel(getChildDevice("uno-zone-${zone}")?.label)
     // A zone that still has its default label has no real name to show.
     return (label && label != "Zone ${zone}") ? label : null
 }
@@ -730,7 +813,7 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
     String dni = "uno-zone-${zoneNum}"
     def existing = getChildDevice(dni)
 
-    String finalLabel = nameForInference ?: existing?.label ?: "Zone ${zoneNum}"
+    String finalLabel = prefixedLabel(zoneBaseLabel(zoneNum, hintedLabel, known.restLabel ?: inferredName, existing))
 
     if (!existing) {
         String newDriver = driverForNewZone(hintedType, inferredType, nameForInference)
@@ -750,15 +833,37 @@ def upsertDiscoveredZone(Integer zoneNum, String suggestedType = null, String su
     relabelZone(existing, zoneNum, finalLabel)
 }
 
-// What the user (zone hints) and the panel's web interface (REST labels) say about a zone.
+// What the user (the Zone names below the settings, or Zone Hints) and the panel's web interface (REST labels) say
+// about a zone. A name or type chosen for one zone on the page wins over its line in Zone Hints.
 private Map knownZoneNames(Integer zoneNum) {
     Map hints = (state.zoneHintsMap instanceof Map) ? state.zoneHintsMap : parseZoneHints(settings.zoneHints)
     Map hint = hints["${zoneNum}"] ?: [:]
+    String ownName = settings["zoneName_${zoneNum}"]?.toString()?.trim()
+    String ownType = settings["zoneType_${zoneNum}"]?.toString()?.trim()
     return [
-        hintedLabel: hint.label?.trim() ?: null,
-        hintedType : hint.type?.trim() ?: null,
+        hintedLabel: ownName ?: hint.label?.trim() ?: null,
+        hintedType : (ownType && ownType != "auto") ? ownType : (hint.type?.trim() ?: null),
         restLabel  : state.restZoneLabels ? state.restZoneLabels["${zoneNum}"] : null
     ]
+}
+
+// The name for a zone, without the prefix. A name you chose always applies. The UNO's name replaces the label only
+// while that is still the default or what this app set last time, so a name changed on the Devices page is kept.
+private String zoneBaseLabel(Integer zoneNum, String chosen, String fromPanel, def existing) {
+    String key = "${zoneNum}".toString()
+    Map applied = (state.appliedLabels instanceof Map) ? state.appliedLabels : [:]
+    String current = unprefixedLabel(existing?.label)
+    boolean untouched = !current || current == "Zone ${zoneNum}" || current == applied[key]
+
+    String base = chosen ?: ((fromPanel && untouched) ? fromPanel : (current ?: "Zone ${zoneNum}"))
+
+    // Only a name this app set is remembered; a hand-made one must never look like ours.
+    if ((base == chosen || base == fromPanel) && applied[key] != base) {
+        Map updated = new LinkedHashMap(applied)
+        updated[key] = base
+        state.appliedLabels = updated
+    }
+    return base
 }
 
 // The driver for a zone seen for the first time: a hint wins, then what the event or name suggests, then the default.
@@ -850,9 +955,32 @@ private String desiredDriverForExisting(String currentDriver, String hintedType,
     return learned ? driverNameForType(canonicalType(learned)) : currentDriver
 }
 
+// The "Load zone names from the UNO" button: fetches the names now, so they can be seen and changed before pressing Done.
+def appButtonHandler(String button) {
+    if (button != "loadZoneNames") return
+    try {
+        loadRestMetadata()
+    } catch (e) {
+        noteRestFailure(e)
+    }
+}
+
+private String zoneNamesStatus() {
+    Map labels = (state.restZoneLabels instanceof Map) ? state.restZoneLabels : [:]
+    String found = labels ? "${labels.size()} zone name(s) loaded from the UNO." : "No zone names loaded from the UNO yet."
+    return "${found} REST: ${state.restStatus ?: 'not checked yet'}"
+}
+
 private void loadRestMetadata() {
+    if (!settings.ip || !settings.password) {
+        state.restStatus = "enter the IP address and password first"
+        return
+    }
     Map meta = restGetJson("D")
-    if (!meta) return
+    if (!meta) {
+        state.restStatus = "no answer from the UNO"
+        return
+    }
 
     List zoneLabels = meta["zone labels"] instanceof List ? meta["zone labels"] : []
     Map<String, String> mapped = [:]

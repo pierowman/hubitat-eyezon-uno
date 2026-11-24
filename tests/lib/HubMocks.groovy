@@ -43,7 +43,7 @@ class MockHttpException extends Exception {
 
 // A child device as seen by the app / connection driver.
 class MockChild {
-    String dni, typeName, label
+    String dni, typeName, label, name
     List events = []
     Set caps = []
     List settingsUpdated = []

@@ -85,6 +85,8 @@ See [INSTALL.md](INSTALL.md). In short: install the drivers, install the app, ad
 
 Device network IDs are fixed, so existing rules and dashboards keep working across upgrades. Only one UNO per hub is supported.
 
+Zone names from the UNO's REST interface are the ones stored on the panel, which keeps only 16 characters of each. Type your own under **Zone names and types** for longer ones. A zone you rename on the Devices page keeps that name when you save the app; the UNO's name only replaces a label that is still the default or the one the app set. A name typed in the app always applies.
+
 ## App settings
 
 | Setting | Purpose |
@@ -100,8 +102,10 @@ Device network IDs are fixed, so existing rules and dashboards keep working acro
 | Zone set | e.g. `1-8,12,20-27`. When filled in it **replaces** Zone Count |
 | Keep a bypassed zone in the open list | Off by default. See [Open zones](#open-zones) |
 | Default type for unknown zones | Used when a zone has no hint and its label doesn't suggest a type |
+| Zone names and types | Under **Zone names and types** (collapsed), one name and one type for each zone in the zone set. The UNO's own name for the zone is shown under each. Leave a name blank to use the UNO's, or type your own. Press **Load zone names from the UNO** to fetch the names now, so you can see and change them before pressing Done. A name or type chosen here wins over Zone Hints |
 | Zone Hints | One zone per line: `zoneNumber:Label:type` (`contact`, `motion`, `smoke`, `co`, `water`) |
 | User names | One per line: `userNumber:Name`, for example `2:Alice`. Used to say who armed or disarmed. Unnamed users show as `user N` |
+| Device name prefix | Optional text put in front of every device label (`Alarm` gives `Alarm Front Door`), so the devices sort together on the Devices page. A prefix longer than 50 characters is cut, and a whole label is cut at 255. A device you renamed by hand keeps its own name, with the prefix in front. Names in events and notifications don't include the prefix |
 | Allow panic commands | Off by default. See [Panic commands](#panic-commands) |
 | PGM outputs to create / PGM names | e.g. `1,3-4` and `1:Garage Door`. See [PGM outputs](#pgm-outputs) |
 | Notifications | Devices to notify, and whether to send alarms (on by default), troubles (on by default) and arm/disarm (off by default). Also quiet hours, a partition filter and the connection-lost alert. See [Notifications](#notifications) |

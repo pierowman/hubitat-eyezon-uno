@@ -93,7 +93,7 @@ class Kit {
         a.metaClass.deleteChildDevice = { String dni -> env.deleted << dni; env.children.remove(dni) }
         a.metaClass.addChildDevice = { String ns, String type, String dni, Map props ->
             env.created << [dni, type]
-            def c = new MockChild(dni: dni, typeName: type, label: props.label)
+            def c = new MockChild(dni: dni, typeName: type, label: props.label, name: props.name)
             env.children[dni] = c
             return c
         }
