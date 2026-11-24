@@ -143,8 +143,12 @@ k.section("The settings page offers a name and type for each configured zone") {
     a.metaClass.dynamicPage = { Map m, Closure c -> c() }
     a.metaClass.section = { Object... args -> (args.last() as Closure).call() }
     a.metaClass.paragraph = { Object... args -> null }
-    // Named arguments reach the method as a leading Map.
-    a.metaClass.input = { Object... args -> inputs[args.find { it instanceof CharSequence }.toString()] = (args.find { it instanceof Map } ?: [:]) }
+    // Hubitat's input takes its named arguments (a Map) first, then the name and type: a Map given last doesn't match
+    // and the page fails to open on a real hub. The stand-in refuses that shape too.
+    a.metaClass.input = { Object... args ->
+        if (!(args[0] instanceof Map)) throw new MissingMethodException("input", delegate.getClass(), args)
+        inputs[args.find { it instanceof CharSequence }?.toString() ?: args[0].name.toString()] = args[0]
+    }
     a.appButtonHandler("loadZoneNames")
     a.mainPage()
 

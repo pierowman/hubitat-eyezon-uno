@@ -197,7 +197,7 @@ k.section("Debug dump") {
     d.logs.clear()
     d.debugDump()
     String dump = d.logs.findAll { it.lvl == "info" }*.msg.join("\n")
-    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.4.0") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
+    k.check("it logs a readable snapshot", dump.contains("UNO Connection 1.4.1") && dump.contains("connection: authenticated") && dump.contains("zones: 4 (from zone set)") && dump.contains("panic true"), dump)
     k.check("it shows the queue by name", dump.contains("in flight disarm") && dump.contains("1 queued (armStay)"), dump)
     k.check("and the recent events", dump.contains("Armed by user 2"), dump)
     k.check("it says whether secrets are set without showing them", dump.contains("password set") && dump.contains("master code set"), dump)

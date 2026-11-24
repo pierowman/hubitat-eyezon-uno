@@ -106,9 +106,12 @@ def mainPage() {
             paragraph zoneNamesStatus()
             configuredZones().each { Integer z ->
                 String panelName = state.restZoneLabels ? state.restZoneLabels["${z}"] : null
-                Map nameInput = [title: "Zone ${z} name", required: false]
-                if (panelName) nameInput.defaultValue = panelName else nameInput.description = "No name stored on the UNO"
-                input "zoneName_${z}", "text", nameInput
+                // Same call shape as every other input on the page (named arguments after the name and type).
+                if (panelName) {
+                    input "zoneName_${z}", "text", title: "Zone ${z} name", defaultValue: panelName, required: false
+                } else {
+                    input "zoneName_${z}", "text", title: "Zone ${z} name", description: "No name stored on the UNO", required: false
+                }
                 input "zoneType_${z}", "enum",
                     title: "Zone ${z} type",
                     options: ["auto": "Automatic (from the name)", "contact": "Contact", "motion": "Motion", "smoke": "Smoke", "co": "CO", "water": "Water"],
@@ -285,7 +288,7 @@ def initialize() {
 }
 
 private String appVersion() {
-    return "1.4.0"
+    return "1.4.1"
 }
 
 // The settings a running connection cannot pick up on its own.

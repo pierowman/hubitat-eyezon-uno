@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Field static final ConcurrentHashMap TEMP_SEEN = new ConcurrentHashMap()      // "<device>:z<zone>" / "<device>:p<n>-inside" -> last temperature byte
 @Field static final ConcurrentHashMap NAME_CACHE = new ConcurrentHashMap()     // "<device>:<zone>" -> [name, at], for the open zone lists
 @Field static final ConcurrentHashMap FRAME_AT = new ConcurrentHashMap()       // device id -> time of the last data from the panel
+@Field static final ConcurrentHashMap CREATE_FAILED = new ConcurrentHashMap()  // "<device>:<dni>" -> when making that child device last failed
 @Field static final ConcurrentHashMap ACK_SEEN = new ConcurrentHashMap()       // device id -> [cc, ee, code, at] of the last acknowledgement
 @Field static final ConcurrentHashMap OPEN_SINCE = new ConcurrentHashMap()    // "<device>:<zone>" -> when it opened (or was first seen open)
 @Field static final ConcurrentHashMap LEFT_OPEN = new ConcurrentHashMap()      // "<device>:<zone>" -> [since, leftAt], for a zone that just closed
@@ -513,7 +514,7 @@ def clearCommandQueue() {
 }
 
 private String driverVersion() {
-    return "1.4.0"
+    return "1.4.1"
 }
 
 // ---- Health: children report online while the connection is authenticated ----
@@ -2129,7 +2130,7 @@ private void handleBypassBitmap(List<String> parts) {
 
 // Conditions only update existing zone devices; they never create new ones.
 private void routeZoneCondition(Integer zone, Map condition, boolean present) {
-    def child = getChildDevice("uno-zone-${zone}")
+    def child = childOrLegacy("uno-zone-${zone}")
     if (!child) return
 
     String value = present ? condition.on : condition.off
@@ -2148,7 +2149,7 @@ private void routeZoneCondition(Integer zone, Map condition, boolean present) {
 
 // Bypass changes only update existing zone devices; they never create new ones.
 private void routeBypassUpdate(Integer zone, boolean bypassed) {
-    def child = getChildDevice("uno-zone-${zone}")
+    def child = childOrLegacy("uno-zone-${zone}")
     if (!child) return
 
     try {
@@ -2354,7 +2355,7 @@ private void handleZoneTemperatures(List<String> parts) {
         if (byteHex == "00" || byteHex == TEMP_SEEN.get(seenKey)) continue
         TEMP_SEEN.put(seenKey, byteHex)
 
-        def child = getChildDevice("uno-zone-${zone}")
+        def child = childOrLegacy("uno-zone-${zone}")
         if (!child) continue
         try {
             child.sendEvent(temperatureEvent("temperature", envisacorToCelsius(byteHex)))
@@ -2501,15 +2502,16 @@ private void emitZoneFastEvent(Integer zoneNum, boolean active) {
 private void routeZoneUpdate(Integer zoneNum, boolean active) {
     String dni = "uno-zone-${zoneNum}"
 
-    def child = getChildDevice(dni)
+    def child = childOrLegacy(dni)
 
     if (!child) {
         ensureZoneFor(zoneNum, null)
-        child = getChildDevice(dni)
+        child = childOrLegacy(dni)
     }
 
     if (!child) {
-        logWarn("Zone ${zoneNum} device not found: ${dni}")
+        String message = "Zone ${zoneNum} device not found: ${dni}"
+        if (creationBlocked(dni)) logDebug(message) else logWarn(message)
         return
     }
 
@@ -2572,6 +2574,10 @@ private Map zoneSpec(Integer zone) {
 // Creates the devices that are missing and brings the others up to date (names, prefix, zone types). The app calls
 // this after it has saved, and the button on this device does the same.
 def syncDevices() {
+    // An explicit sync tries again for anything that failed before.
+    String failedPrefix = "${device.id}:".toString()
+    CREATE_FAILED.keySet().findAll { String key -> key.startsWith(failedPrefix) }.each { String key -> CREATE_FAILED.remove(key) }
+
     Map plan = devicePlan()
     if (plan == null) return
 
@@ -2620,13 +2626,44 @@ private boolean ensurePartitionDevice(Integer partition, String base, String pre
         logInfo("Created partition device: ${label}")
         return true
     } catch (e) {
-        logWarn("Could not create partition ${partition} (is the 'UNO Partition' driver installed?): ${e}")
+        noteCreateFailure(dni, "partition ${partition}", "UNO Partition", e)
         return false
+    }
+}
+
+// A device that can't be made is not tried again for five minutes (a zone event would otherwise try on every change),
+// until Sync devices is pressed.
+private boolean creationBlocked(String dni) {
+    Long at = (Long) CREATE_FAILED.get("${device.id}:${dni}".toString())
+    return at != null && (now() - at) < 300000L
+}
+
+private void noteCreateFailure(String dni, String what, String driver, def e) {
+    CREATE_FAILED.put("${device.id}:${dni}".toString(), now())
+    if (e.toString().contains("DuplicateDNI") || e.toString().contains("already exists")) {
+        logWarn("Could not create ${what}: a device with the id ${dni} already exists, most likely the old copy the app made before version 1.4.0, " +
+                "which Hubitat would not delete (something still uses it). Updates keep going to the old one for now. Stop using it in rules and dashboards, " +
+                "press Done in the app (or delete it on the Devices page), then press Sync devices here. Hubitat said: ${e}")
+    } else {
+        logWarn("Could not create ${what} (is the '${driver}' driver installed?): ${e}")
+    }
+}
+
+// While the old copy of a device (made by the app before 1.4.0) can't be removed, its id is taken and the new device
+// can't be made, so updates keep going to the old one and anything that uses it keeps working.
+private def childOrLegacy(String dni) {
+    def own = getChildDevice(dni)
+    if (own || !creationBlocked(dni)) return own
+    try {
+        return parent?.getChildDevice(dni)
+    } catch (ignored) {
+        return null
     }
 }
 
 // A zone event can arrive before the zone has a device, and can say what kind of sensor it is (smoke, water, CO).
 private void ensureZoneFor(Integer zone, String suggestedType) {
+    if (creationBlocked("uno-zone-${zone}")) return
     if (!suggestedType && getChildDevice("uno-zone-${zone}")) return
     ensureZoneDevice(zone, suggestedType, devicePlan() ?: [:], (state.appliedPrefix ?: "").toString())
 }
@@ -2669,7 +2706,7 @@ private boolean addZoneDevice(Integer zoneNum, String driver, String label) {
         applyHealth(addChildDevice("uno", driver, "uno-zone-${zoneNum}", [name: "UNO Zone ${zoneNum}", label: label, isComponent: true]))
         return true
     } catch (e) {
-        logWarn("Could not create zone ${zoneNum} (is the '${driver}' driver installed?): ${e}")
+        noteCreateFailure("uno-zone-${zoneNum}", "zone ${zoneNum}", driver, e)
         return false
     }
 }
@@ -2834,7 +2871,7 @@ private String desiredDriverForExisting(String currentDriver, String hintedType,
 
 private void sendPartitionState(Integer partition, String status) {
     try {
-        getChildDevice("uno-partition-${partition}")?.setAlarmState(status)
+        childOrLegacy("uno-partition-${partition}")?.setAlarmState(status)
     } catch (e) {
         logDebug("Failed to update partition ${partition}: ${e}")
     }
@@ -2842,7 +2879,7 @@ private void sendPartitionState(Integer partition, String status) {
 
 // Partitions without a device (not in the partition set) are ignored.
 private void sendPartitionEvents(Integer partition, List events) {
-    def dev = getChildDevice("uno-partition-${partition}")
+    def dev = childOrLegacy("uno-partition-${partition}")
     if (!dev) return
     events?.each { Map e -> dev.sendEvent(e) }
 }

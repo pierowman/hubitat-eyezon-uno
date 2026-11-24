@@ -134,6 +134,43 @@ k.section("A partition taken out of the set doesn't count as a second one") {
     k.check("the one taken out does not", kids["uno-partition-2"].last("openZones") == null)
 }
 
+k.section("A device id that is taken by the old copy") {
+    def (a, conn, env) = k.newPair([zoneCount: 3])
+    // The old zone 1 can't be deleted (something uses it), so the new one can't be made with the same id.
+    def old = new MockChild(dni: "uno-zone-1", typeName: "UNO Zone Contact", label: "Front Door", caps: ["ContactSensor"] as Set)
+    env.children["uno-zone-1"] = old
+    a.metaClass.deleteChildDevice = { String dni -> throw new IllegalStateException("in use by a rule") }
+    int attempts = 0
+    def realAdd = conn.host.&make
+    conn.metaClass.addChildDevice = { String ns, String type, String dni, Map props ->
+        if (dni == "uno-zone-1") { attempts++; throw new IllegalStateException("A device with DNI 'uno-zone-1' already exists") }
+        realAdd(type, dni, props)
+    }
+    conn.save()
+    k.check("the others are made, and the failure is explained once", conn.host.children.keySet().containsAll(["uno-zone-2", "uno-zone-3"]) && conn.warns().count { it.contains("uno-zone-1") && it.contains("already exists") && it.contains("Sync devices") } == 1, conn.warns())
+
+    conn.initialize(); conn.parse(k.hex("Login:")); conn.parse(k.hex("OK\r\n"))
+    int before = attempts
+    k.feed(conn, "%01," + bitmap([1]) + "\$")
+    k.check("updates keep going to the old device, so rules on it keep working", old.last("contact") == "open", old.events)
+    k.feed(conn, "%01," + bitmap([]) + "\$")
+    k.feed(conn, "%01," + bitmap([1]) + "\$")
+    k.check("it is not retried on every change, and the log isn't flooded", attempts == before && conn.warns().count { it.contains("uno-zone-1") } == 1, [attempts, conn.warns().size()])
+
+    conn.nowMs += 301000L
+    k.feed(conn, "%01," + bitmap([]) + "\$")
+    k.check("it is tried again after five minutes", attempts == before + 1, attempts)
+
+    attempts = 0
+    conn.syncDevices()
+    k.check("and at once when Sync devices is pressed", attempts >= 1, attempts)
+
+    env.children.remove("uno-zone-1")
+    conn.metaClass.addChildDevice = { String ns, String type, String dni, Map props -> realAdd(type, dni, props) }
+    conn.syncDevices()
+    k.check("once the old one is gone the new one is made", conn.host.children.containsKey("uno-zone-1"), conn.host.children.keySet())
+}
+
 k.section("The partition and zone devices talk to the connection device") {
     // The partition and zone drivers send their commands to their parent, which is now the connection device.
     def conn = k.newConn()
