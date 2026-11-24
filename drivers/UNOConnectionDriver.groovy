@@ -321,7 +321,7 @@ def login() {
 
     // Outside a ^...$ packet the TPI treats 0-9, * and # as keypad keystrokes (spec 3.1), so a password
     // sent after login would be typed into the panel.
-    if (state.loggedIn) {
+    if (isLoggedIn()) {
         logWarn("Already logged in; not sending the password")
         return
     }
@@ -861,10 +861,21 @@ private void reportDropped(List dropped, String reason) {
     logWarn("Dropped ${dropped.size()} command(s) (${reason}): ${dropped*.name.join(', ')}")
 }
 
+// Hub state is saved when an execution ends, so a reconnect that was still finishing can write "not logged in" over a login
+// that completed in the meantime (the queue then waits for a login that never comes). The connection state attribute is
+// written at once and only says "authenticated" between a login and the next drop, so it settles the question.
+private boolean isLoggedIn() {
+    if (state.loggedIn) return true
+    if (device.currentValue("connectionState") != "authenticated") return false
+
+    state.loggedIn = true
+    return true
+}
+
 private void processQueue() {
     expireStaleCommands()
 
-    if (!state.loggedIn) {
+    if (!isLoggedIn()) {
         logDebug("Queue paused until login completes")
         return
     }
@@ -1014,7 +1025,7 @@ def parse(String message) {
 // The login prompt has no terminator, so it is removed from the buffer (or it would prefix the "OK" reply) and
 // answered with the password. Returns the rest of the buffer.
 private String takeLoginPrompt(String buffer) {
-    if (state.loggedIn || state.loginSent) return buffer
+    if (isLoggedIn() || state.loginSent) return buffer
 
     int idx = buffer.toLowerCase().indexOf("login")
     if (idx < 0) return buffer

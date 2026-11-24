@@ -9,6 +9,26 @@ def lateWrite = { d, String cc, String code ->
     d.state.commandInFlight = saved
 }
 
+k.section("A login written over by a reconnect that was still finishing") {
+    // State is saved when an execution ends, so "not logged in" can overwrite a login that completed in between.
+    def d = k.authed()
+    d.state.loggedIn = false
+    d.poll()
+    k.check("the connection state says it is logged in, so the queue goes on", d.sent.size() == 1 && d.state.loggedIn == true, [d.sent, d.state.loggedIn])
+    k.check("and does not wait for a login that will never come", !d.logs.any { it.msg.contains("Queue paused until login completes") }, d.logs.takeRight(3))
+
+    def c = k.newConn()
+    c.initialize()
+    c.state.loggedIn = false
+    c.poll()
+    k.check("while connecting, it still waits for the login", c.sent.isEmpty() && c.state.loggedIn == false, c.sent)
+
+    def p = k.authed()
+    p.state.loggedIn = false
+    p.login()
+    k.check("a password is never typed in while the connection says it is logged in (the panel would take it as keystrokes)", p.sent.isEmpty() && p.warns().any { it.contains("Already logged in") }, [p.sent, p.warns()])
+}
+
 k.section("A reply that beats the sender's state write is still honoured") {
     def d = k.authed()
     d.poll()
