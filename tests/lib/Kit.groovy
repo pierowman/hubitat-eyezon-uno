@@ -53,6 +53,9 @@ class Kit {
 
     static String hex(String s) { s.getBytes("US-ASCII").encodeHex().toString().toUpperCase() }
 
+    // The release version, from the one place it is edited (packageManifest.json).
+    String version() { new groovy.json.JsonSlurper().parse(new File(repo, "packageManifest.json")).version.toString() }
+
     // ---- connection driver ----
     HubBase newConn(Map over = [:]) {
         HubBase d = load("drivers/UNOConnectionDriver.groovy")

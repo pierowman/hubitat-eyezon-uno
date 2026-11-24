@@ -67,6 +67,19 @@ class StaticChecks {
                     k.check("${rel} is listed in packageManifest.json", listed.contains(rel))
                 }
                 k.check("licenseFile has no placeholder", !manifest.licenseFile.toString().contains("<"))
+
+                // The manifest's version is what the hub's package manager compares, so it is the one to edit (see
+                // tests/bump-version.groovy); the two scripts that report a version must say the same thing.
+                String version = manifest.version.toString()
+                k.check("the manifest version looks like x.y.z", version ==~ /\d+\.\d+\.\d+/, version)
+                k.check("the manifest has a release date", manifest.dateReleased.toString() ==~ /\d{4}-\d{2}-\d{2}/, manifest.dateReleased)
+                [["apps/UNOIntegrationApp.groovy", "appVersion"], ["drivers/UNOConnectionDriver.groovy", "driverVersion"]].each { List pair ->
+                    String text = new File(k.repo, pair[0] as String).text
+                    def m = (text =~ /String ${pair[1]}\(\)\s*\{\s*return "([^"]+)"/)
+                    String found = m.find() ? m.group(1) : null
+                    k.check("${pair[0]} reports version ${version}, the same as the manifest", found == version, found)
+                }
+                k.check("the release notes mention the current version", manifest.releaseNotes.toString().contains(version), version)
             }
         }
     }

@@ -31,6 +31,20 @@ pip install codespell; codespell README.md INSTALL.md docs tests apps drivers pa
 
 CodeNarc can't run on Groovy 2.4, so it is a Groovy 4 job. The 2.4 parse check and test run stay in the `test` job.
 
+## Releasing a new version
+
+The version is written in three places, because a Hubitat script can't read the manifest or share a constant with another script: `packageManifest.json` (what the Hubitat Package Manager compares to offer an update, so this is the one that counts), `appVersion()` in the app and `driverVersion()` in the connection driver. One command sets all three, and the release date:
+
+```
+groovy tests/bump-version.groovy 1.4.3
+```
+
+Then add a `1.4.3: ...` entry to `releaseNotes` in the manifest. The tests fail if any of the three disagree, or if the release notes don't mention the version, so nothing can be released half-bumped. (The tests read the version from the manifest, so they need no edit.)
+
+| Path | Purpose |
+|---|---|
+| `bump-version.groovy` | Sets the version in the manifest, the app and the connection driver |
+
 ## Layout
 
 | Path | Purpose |
