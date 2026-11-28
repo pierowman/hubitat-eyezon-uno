@@ -514,7 +514,7 @@ def clearCommandQueue() {
 }
 
 private String driverVersion() {
-    return "1.4.2"
+    return "1.4.3"
 }
 
 // ---- Health: children report online while the connection is authenticated ----

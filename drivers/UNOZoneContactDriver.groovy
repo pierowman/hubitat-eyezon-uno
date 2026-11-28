@@ -4,8 +4,11 @@ metadata {
         capability "Sensor"
         capability "ContactSensor"
         capability "TamperAlert"
-        capability "TemperatureMeasurement"
         capability "HealthCheck"
+
+        // Not the TemperatureMeasurement capability: that makes Alexa and other capability pickers list every door and
+        // motion zone as a temperature sensor. The attribute is still published for zones that report a temperature.
+        attribute "temperature", "number"
 
         attribute "zoneStateDigit", "string"
         attribute "lastFault", "string"

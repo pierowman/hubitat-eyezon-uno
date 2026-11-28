@@ -34,7 +34,7 @@ A Hubitat integration for the **EyezOn UNO Alarm System**.
 - Per-zone `batteryStatus` (`ok`/`low`) and `supervision` (`ok`/`lost`) from the UNO's low-battery and lost-supervision events
 - Lists of the open and bypassed zones by name (`openZones`, `bypassedZones`) on the connection device, and per partition when you assign zones to partitions (or when there is only one partition). The open list also comes with a count and **when each zone opened**, as text for notifications and tiles and as JSON for rules
 - An option to keep a zone that was open when it was bypassed in the open list, for panels that report bypassed zones as closed
-- Per-zone `temperature` for wireless zones that report one, and inside/outside temperature on the partition
+- Per-zone `temperature` for wireless zones that report one, and inside/outside temperature on the partition. Zones publish it as an attribute only, without Hubitat's TemperatureMeasurement capability, so Alexa and other capability pickers don't list a door as a temperature sensor
 - Fast location events for low-latency automations: `unoZoneEvent`
 - CID fast-path for zone alarm events, ahead of the next zone bitmap
 
@@ -261,7 +261,7 @@ Set **Report sensors with no activity for this many days** to be told about zone
 
 Unrecognised or transitory panel states are reported as `busy`, as the TPI document recommends.
 
-**Zone device**: the capability attribute (`contact`, `motion`, `smoke`, `carbonMonoxide` or `water`), `zoneStateDigit` (`1` open/active, `0` closed), `lastFault` (when it last opened), `bypassed` (`true`/`false`), `tamper` (`detected`/`clear`), `batteryStatus` (`ok`/`low`), `supervision` (`ok`/`lost`), `temperature` (wireless zones that report one) and `healthStatus` (`online`/`offline`). The tamper, battery and supervision attributes come from the UNO's Contact ID events (137/144/383, 384 and 381), so they only change for sensors that send them.
+**Zone device**: the capability attribute (`contact`, `motion`, `smoke`, `carbonMonoxide` or `water`), `zoneStateDigit` (`1` open/active, `0` closed), `lastFault` (when it last opened), `bypassed` (`true`/`false`), `tamper` (`detected`/`clear`), `batteryStatus` (`ok`/`low`), `supervision` (`ok`/`lost`), `temperature` (wireless zones that report one; an attribute only, not the TemperatureMeasurement capability, so a dashboard temperature tile won't list a zone but an attribute tile will) and `healthStatus` (`online`/`offline`). The tamper, battery and supervision attributes come from the UNO's Contact ID events (137/144/383, 384 and 381), so they only change for sensors that send them.
 
 **PGM device**: `lastTriggered` and `healthStatus`.
 

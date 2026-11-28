@@ -44,3 +44,13 @@ k.section("Status driver") {
     s.ping()
     k.check("ping asks the panel for a refresh", s.parent.callArgs == [["refreshAll", []]], s.parent.callArgs)
 }
+k.section("Zone devices are not offered as temperature sensors") {
+    // A device with the TemperatureMeasurement capability is listed by Alexa (and any capability picker) as a temperature
+    // sensor, so a door contact showed up as one. The attribute stays, for the zones that do report a temperature.
+    ["Contact", "Motion", "Smoke", "CO", "Water"].each { String type ->
+        String src = new File(k.repo, "drivers/UNOZone${type}Driver.groovy").text
+        k.check("${type}: no TemperatureMeasurement capability", !src.contains('capability "TemperatureMeasurement"'))
+        k.check("${type}: still declares a temperature attribute", src.contains('attribute "temperature", "number"'))
+    }
+    k.check("the partition keeps it, as it reports the inside temperature", new File(k.repo, "drivers/UNOPartitionDriver.groovy").text.contains('capability "TemperatureMeasurement"'))
+}
